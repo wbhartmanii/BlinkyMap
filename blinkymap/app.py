@@ -492,15 +492,45 @@ class SessionsTab(ttk.Frame):
             dot.pack(side="left")
             tk.Label(key_frame, text=f" {label}   ").pack(side="left")
 
-        # ── mini 3D view ──────────────────────────────────────────────────────
-        view_sec = _section(self, "Live 3D View  (updates after each session)")
+        # ── 3D view + pixel list (side-by-side) ──────────────────────────────
+        split = ttk.PanedWindow(self, orient="horizontal")
+        split.pack(fill="both", expand=True, padx=4, pady=2)
+
+        left_lf = ttk.LabelFrame(split, text="Live 3D View  (updates each session)",
+                                  padding=4)
+        split.add(left_lf, weight=3)
         if _MPL_OK:
-            self.fig = Figure(figsize=(5, 3.5), dpi=88)
-            self.ax = self.fig.add_subplot(111, projection="3d")
-            self.canvas = FigureCanvasTkAgg(self.fig, master=view_sec)
+            self.fig = Figure(figsize=(3.8, 3.2), dpi=88)
+            self.ax  = self.fig.add_subplot(111, projection="3d")
+            self.canvas = FigureCanvasTkAgg(self.fig, master=left_lf)
             self.canvas.get_tk_widget().pack(fill="both", expand=True)
         else:
-            ttk.Label(view_sec, text="Install matplotlib for 3D preview").pack()
+            ttk.Label(left_lf, text="Install matplotlib for 3D preview").pack()
+
+        right_lf = ttk.LabelFrame(split, text="Pixel Status", padding=4)
+        split.add(right_lf, weight=2)
+
+        # Pixel status treeview
+        pcols = ("ch", "status", "conf", "seen", "err")
+        self.pixel_tree = ttk.Treeview(right_lf, columns=pcols,
+                                        show="headings", height=14,
+                                        selectmode="browse")
+        for col, hdr, w in zip(pcols,
+                                ("Ch #", "Status", "Conf %", "Seen", "Err px"),
+                                (48,     66,       52,       44,     58)):
+            self.pixel_tree.heading(col, text=hdr)
+            self.pixel_tree.column(col, width=w, anchor="center", stretch=False)
+
+        self.pixel_tree.tag_configure("high",   background="#dcfce7")  # green tint
+        self.pixel_tree.tag_configure("medium", background="#fef9c3")  # yellow tint
+        self.pixel_tree.tag_configure("low",    background="#fee2e2")  # red tint
+        self.pixel_tree.tag_configure("unseen", background="#f3f4f6")  # grey tint
+
+        pscroll = ttk.Scrollbar(right_lf, orient="vertical",
+                                 command=self.pixel_tree.yview)
+        self.pixel_tree.configure(yscrollcommand=pscroll.set)
+        pscroll.pack(side="right", fill="y")
+        self.pixel_tree.pack(side="left", fill="both", expand=True)
 
         # ── progress log ──────────────────────────────────────────────────────
         log_sec = _section(self, "Log")
@@ -701,6 +731,7 @@ class SessionsTab(ttk.Frame):
         if len(calibrated) < 2:
             self._log("Need ≥2 sessions to triangulate — add another session.")
             self._update_confidence(None, n_pixels)
+            self._update_pixel_list({}, n_pixels)
             return
 
         results = triangulate_sessions(self.app.sessions, n_pixels)
@@ -710,6 +741,7 @@ class SessionsTab(ttk.Frame):
         self.app.model_confidence = mc
 
         self._update_confidence(mc, n_pixels)
+        self._update_pixel_list(results, n_pixels)
         self._update_3d(results, mc)
         self._log(
             f"→ Model: {mc.score_pct}% confidence  |  "
@@ -733,30 +765,65 @@ class SessionsTab(ttk.Frame):
             f"Avg reprojection error: {mc.mean_reprojection_px:.1f} px"
         )
 
+    def _update_pixel_list(self, results: Dict[int, PixelResult], total: int):
+        """Populate the pixel status treeview. Unseen + low-confidence first."""
+        for item in self.pixel_tree.get_children():
+            self.pixel_tree.delete(item)
+
+        _sort_key = {"unseen": 0, "low": 1, "medium": 2, "high": 3}
+        rows = []
+        for idx in range(total):
+            ch = idx + 1  # 1-based channel number
+            r = results.get(idx)
+            if r is None or r.position is None:
+                rows.append((_sort_key["unseen"], ch, "unseen", "—", "—", "—"))
+            else:
+                label = r.confidence_label
+                conf  = f"{r.confidence * 100:.0f}%"
+                seen  = str(r.session_count)
+                err   = (f"{r.reprojection_error:.1f}"
+                         if r.reprojection_error < 999 else "—")
+                rows.append((_sort_key[label], ch, label, conf, seen, err))
+
+        rows.sort(key=lambda x: (x[0], x[1]))
+        for _, ch, label, conf, seen, err in rows:
+            self.pixel_tree.insert("", "end",
+                                   values=(ch, label, conf, seen, err),
+                                   tags=(label,))
+
     def _update_3d(self, results: Dict[int, PixelResult], mc: ModelConfidence):
         if not _MPL_OK:
             return
 
         self.ax.clear()
 
-        # Sort pixels by confidence label for legend grouping
-        groups: Dict[str, list] = {"high": [], "medium": [], "low": [], "unseen": []}
+        # Group triangulated pixels by confidence label
+        groups: Dict[str, list] = {"high": [], "medium": [], "low": []}
         for r in results.values():
             if r.position is not None:
-                groups[r.confidence_label].append(r)
-            else:
-                groups["unseen"].append(r)
+                groups.setdefault(r.confidence_label, []).append(r)
 
         for label, color in CONF_COLORS.items():
-            grp = groups[label]
+            if label == "unseen":
+                continue
+            grp = groups.get(label, [])
             if not grp:
                 continue
-            has_pos = [r for r in grp if r.position is not None]
-            if not has_pos:
-                continue
-            pts = np.array([r.position for r in has_pos])
+            pts   = np.array([r.position   for r in grp])
+            confs = np.array([r.confidence for r in grp])
+
+            # Layer 1 — uncertainty halos: size ∝ (1 − confidence)
+            # High-conf points get a tiny halo; low-conf get a big fuzzy one.
+            halo_s = (1.0 - confs) ** 1.2 * 500 + 15
             self.ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
-                            c=color, s=8, alpha=0.85, label=label)
+                            c=color, s=halo_s, alpha=0.13,
+                            linewidths=0, depthshade=False)
+
+            # Layer 2 — center dots: fixed size, opaque
+            self.ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
+                            c=color, s=14, alpha=0.92,
+                            linewidths=0.5, edgecolors="white",
+                            label=label, depthshade=True)
 
         self.ax.set_xlabel("X", fontsize=7)
         self.ax.set_ylabel("Y", fontsize=7)
@@ -840,13 +907,30 @@ class ExportTab(ttk.Frame):
             return
         self.ax.clear()
 
+        groups: Dict[str, list] = {"high": [], "medium": [], "low": []}
+        for r in results.values():
+            if r.position is not None:
+                groups.setdefault(r.confidence_label, []).append(r)
+
         for label, color in CONF_COLORS.items():
-            pts = [r.position for r in results.values()
-                   if r.position is not None and r.confidence_label == label]
-            if pts:
-                arr = np.array(pts)
-                self.ax.scatter(arr[:, 0], arr[:, 1], arr[:, 2],
-                                c=color, s=12, alpha=0.9, label=label)
+            if label == "unseen":
+                continue
+            grp = groups.get(label, [])
+            if not grp:
+                continue
+            pts   = np.array([r.position   for r in grp])
+            confs = np.array([r.confidence for r in grp])
+
+            # Halos — sized by uncertainty
+            halo_s = (1.0 - confs) ** 1.2 * 650 + 20
+            self.ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
+                            c=color, s=halo_s, alpha=0.14,
+                            linewidths=0, depthshade=False)
+            # Center dots
+            self.ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
+                            c=color, s=20, alpha=0.92,
+                            linewidths=0.5, edgecolors="white",
+                            label=label, depthshade=True)
 
         self.ax.set_xlabel("X")
         self.ax.set_ylabel("Y (height)")
