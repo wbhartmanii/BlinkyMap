@@ -1,19 +1,21 @@
 """
-BlinkyMap GUI — tkinter wizard with 5 tabs:
-  1. Controller  — FPP/E1.31 setup
-  2. Cameras     — add USB / IP cameras, live preview
-  3. Calibrate   — simple (baseline + FOV) or checkerboard
-  4. Scan        — run the pixel-by-pixel scan
-  5. Results     — 3D viewer + export
+BlinkyMap GUI — single-camera, multi-session workflow.
+
+Tabs:
+  1. Controller  — FPP / E1.31 setup
+  2. Camera      — one camera (USB or IP), intrinsic calibration
+  3. Sessions    — run scans, accumulate sessions, live 3D confidence view
+  4. Export      — save xModel / CSV when you're happy
 """
 
 import logging
+import math
 import queue
 import threading
 import time
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 from typing import Dict, List, Optional
 
 import cv2
@@ -21,7 +23,6 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-# ── lazy imports so the GUI opens even if opencv isn't installed ───────────────
 try:
     from PIL import Image, ImageTk
     _PIL_OK = True
@@ -41,23 +42,22 @@ from .capture import (Camera, CameraManager, LEDDetector, PixelCapture,
                        capture_backgrounds, scan_pixel)
 from .controller import ControllerConfig, PixelController
 from .export import export_all
-from .triangulate import (CameraCalib, SimpleStereoConfig, build_simple_stereo,
-                           normalize_positions, remove_outliers,
-                           triangulate_all)
+from .triangulate import (
+    CameraCalib, CheckerboardConfig, ModelConfidence, PixelResult,
+    ScanSession, build_session_calib, calibrate_camera_intrinsics,
+    compute_model_confidence, extract_positions, locate_session_pnp,
+    _make_K, normalize_positions, remove_outliers, triangulate_sessions,
+)
 
 
-# ── helpers ───────────────────────────────────────────────────────────────────
+# ── UI helpers ────────────────────────────────────────────────────────────────
 
-def _frame_to_tk(frame: np.ndarray, max_w: int = 320, max_h: int = 240):
-    """Convert BGR numpy frame to a PhotoImage scaled to max dimensions."""
-    if not _PIL_OK:
-        return None
-    h, w = frame.shape[:2]
-    scale = min(max_w / w, max_h / h, 1.0)
-    nw, nh = int(w * scale), int(h * scale)
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    img = Image.fromarray(rgb).resize((nw, nh), Image.LANCZOS)
-    return ImageTk.PhotoImage(img)
+CONF_COLORS = {          # confidence label → hex colour for matplotlib scatter
+    "high":   "#22c55e",  # green
+    "medium": "#eab308",  # yellow
+    "low":    "#ef4444",  # red
+    "unseen": "#6b7280",  # grey
+}
 
 
 def _section(parent, text: str) -> ttk.LabelFrame:
@@ -67,16 +67,25 @@ def _section(parent, text: str) -> ttk.LabelFrame:
 
 
 def _row(parent, label: str, widget_factory, **kw):
-    """Helper: label on left, widget on right in a frame row."""
     f = ttk.Frame(parent)
     f.pack(fill="x", pady=2)
-    ttk.Label(f, text=label, width=22, anchor="w").pack(side="left")
+    ttk.Label(f, text=label, width=24, anchor="w").pack(side="left")
     w = widget_factory(f, **kw)
     w.pack(side="left", fill="x", expand=True)
     return w
 
 
-# ── per-tab frames ─────────────────────────────────────────────────────────────
+def _frame_to_tk(frame: np.ndarray, max_w=380, max_h=280):
+    if not _PIL_OK:
+        return None
+    h, w = frame.shape[:2]
+    scale = min(max_w / w, max_h / h, 1.0)
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    img = Image.fromarray(rgb).resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+    return ImageTk.PhotoImage(img)
+
+
+# ── Tab 1: Controller ─────────────────────────────────────────────────────────
 
 class ControllerTab(ttk.Frame):
     def __init__(self, parent, app):
@@ -112,40 +121,6 @@ class ControllerTab(ttk.Frame):
         ttk.Label(self, textvariable=self.status_var,
                   foreground="gray").pack(padx=8, pady=4, anchor="w")
 
-    def _make_controller(self) -> PixelController:
-        cfg = ControllerConfig(
-            host=self.host_var.get(),
-            universe=self.universe_var.get(),
-            start_channel=self.start_ch_var.get(),
-            pixel_count=self.pixel_count_var.get(),
-            inter_pixel_delay=self.delay_var.get(),
-        )
-        ctrl = PixelController(cfg)
-        ctrl.connect()
-        return ctrl
-
-    def _test(self):
-        self.status_var.set("Connecting…")
-        self.update()
-        try:
-            ctrl = self._make_controller()
-            info = ctrl.connect()
-            fpp_str = f"FPP {info['fpp_version']}" if info["fpp_detected"] else "FPP not found (direct E1.31)"
-            self.status_var.set(f"OK — {fpp_str}")
-            self.app.controller = ctrl
-        except Exception as e:
-            self.status_var.set(f"Error: {e}")
-            log.exception("Controller test failed")
-
-    def _flash(self):
-        try:
-            ctrl = self._make_controller()
-            self.app.controller = ctrl
-            threading.Thread(target=ctrl.test_pattern, daemon=True).start()
-            self.status_var.set("Flashing 5 pixels…")
-        except Exception as e:
-            self.status_var.set(f"Error: {e}")
-
     def get_config(self) -> ControllerConfig:
         return ControllerConfig(
             host=self.host_var.get(),
@@ -155,350 +130,391 @@ class ControllerTab(ttk.Frame):
             inter_pixel_delay=self.delay_var.get(),
         )
 
+    def _make_ctrl(self) -> PixelController:
+        ctrl = PixelController(self.get_config())
+        ctrl.connect()
+        return ctrl
 
-class CamerasTab(ttk.Frame):
+    def _test(self):
+        self.status_var.set("Connecting…")
+        self.update()
+        try:
+            ctrl = self._make_ctrl()
+            info = ctrl.connect()
+            fpp = f"FPP {info['fpp_version']}" if info["fpp_detected"] else "direct E1.31"
+            self.status_var.set(f"OK — {fpp}  |  host={info['host']}")
+        except Exception as e:
+            self.status_var.set(f"Error: {e}")
+
+    def _flash(self):
+        try:
+            ctrl = self._make_ctrl()
+            threading.Thread(target=ctrl.test_pattern, daemon=True).start()
+            self.status_var.set("Flashing…")
+        except Exception as e:
+            self.status_var.set(f"Error: {e}")
+
+
+# ── Tab 2: Camera ─────────────────────────────────────────────────────────────
+
+class CameraTab(ttk.Frame):
     def __init__(self, parent, app):
         super().__init__(parent)
         self.app = app
-        self.mgr = CameraManager()
-        self._preview_running = False
+        self._cam: Optional[Camera] = None
         self._preview_job = None
+        self._tk_img = None
+        self._checker_imgs: list = []
 
-        # ── add camera controls ───────────────────────────────────────────────
-        add_sec = _section(self, "Add Camera")
+        # ── source ────────────────────────────────────────────────────────────
+        src_sec = _section(self, "Camera Source")
+        self.src_type = tk.StringVar(value="usb")
+        ttk.Radiobutton(src_sec, text="USB", variable=self.src_type,
+                         value="usb", command=self._on_src).pack(side="left")
+        ttk.Radiobutton(src_sec, text="IP / RTSP", variable=self.src_type,
+                         value="ip",  command=self._on_src).pack(side="left", padx=8)
 
-        usb_f = ttk.Frame(add_sec)
-        usb_f.pack(fill="x", pady=2)
-        ttk.Label(usb_f, text="USB index:", width=12).pack(side="left")
-        self.usb_idx = tk.IntVar(value=0)
-        ttk.Spinbox(usb_f, from_=0, to=10, textvariable=self.usb_idx,
+        self.usb_idx_var = tk.IntVar(value=0)
+        self.ip_url_var = tk.StringVar(value="rtsp://")
+
+        usb_row = ttk.Frame(src_sec)
+        usb_row.pack(fill="x", pady=2)
+        ttk.Label(usb_row, text="USB index:", width=12).pack(side="left")
+        ttk.Spinbox(usb_row, from_=0, to=10, textvariable=self.usb_idx_var,
                     width=5).pack(side="left", padx=4)
-        ttk.Button(usb_f, text="Add USB Camera",
-                   command=self._add_usb).pack(side="left", padx=4)
-        ttk.Button(usb_f, text="Scan USB Cameras",
+        ttk.Button(usb_row, text="Scan",
                    command=self._scan_usb).pack(side="left", padx=4)
+        self._usb_row = usb_row
 
-        ip_f = ttk.Frame(add_sec)
-        ip_f.pack(fill="x", pady=2)
-        ttk.Label(ip_f, text="IP/RTSP URL:", width=12).pack(side="left")
-        self.ip_url = tk.StringVar(value="rtsp://")
-        ttk.Entry(ip_f, textvariable=self.ip_url, width=40).pack(side="left", padx=4)
-        ttk.Button(ip_f, text="Add IP Camera",
-                   command=self._add_ip).pack(side="left", padx=4)
+        ip_row = ttk.Frame(src_sec)
+        ttk.Label(ip_row, text="URL:", width=12).pack(side="left")
+        ttk.Entry(ip_row, textvariable=self.ip_url_var, width=38).pack(side="left", padx=4)
+        self._ip_row = ip_row
 
-        # ── camera list ───────────────────────────────────────────────────────
-        list_sec = _section(self, "Connected Cameras")
-        cols = ("id", "label", "resolution", "status")
-        self.tree = ttk.Treeview(list_sec, columns=cols, show="headings", height=4)
-        for c, w in zip(cols, (80, 160, 110, 100)):
-            self.tree.heading(c, text=c.title())
-            self.tree.column(c, width=w)
-        self.tree.pack(fill="x")
-        ttk.Button(list_sec, text="Remove Selected",
-                   command=self._remove).pack(anchor="e", pady=2)
+        ttk.Button(src_sec, text="Open Camera",
+                   command=self._open_cam).pack(anchor="w", pady=4)
+        self.cam_status_var = tk.StringVar(value="No camera opened")
+        ttk.Label(src_sec, textvariable=self.cam_status_var,
+                   foreground="gray").pack(anchor="w")
+
+        # ── intrinsics ────────────────────────────────────────────────────────
+        cal_sec = _section(self, "Intrinsic Calibration")
+        self.cal_mode_var = tk.StringVar(value="fov")
+        ttk.Radiobutton(cal_sec, text="Use FOV estimate",
+                         variable=self.cal_mode_var, value="fov",
+                         command=self._on_cal_mode).pack(anchor="w")
+        ttk.Radiobutton(cal_sec, text="Checkerboard (more accurate)",
+                         variable=self.cal_mode_var, value="checker",
+                         command=self._on_cal_mode).pack(anchor="w")
+
+        # FOV entry
+        self._fov_frame = ttk.Frame(cal_sec)
+        self.fov_var = tk.DoubleVar(value=70.0)
+        _row(self._fov_frame, "Horiz. FOV (°):", ttk.Spinbox,
+             from_=20, to=170, increment=1, textvariable=self.fov_var, width=8)
+        self._fov_frame.pack(fill="x")
+
+        # Checker capture
+        self._chk_frame = ttk.Frame(cal_sec)
+        self.chk_rows_var = tk.IntVar(value=9)
+        self.chk_cols_var = tk.IntVar(value=6)
+        self.chk_sq_var  = tk.DoubleVar(value=0.025)
+        _row(self._chk_frame, "Inner corners (rows):", ttk.Spinbox,
+             from_=3, to=20, textvariable=self.chk_rows_var, width=6)
+        _row(self._chk_frame, "Inner corners (cols):", ttk.Spinbox,
+             from_=3, to=20, textvariable=self.chk_cols_var, width=6)
+        _row(self._chk_frame, "Square size (m):", ttk.Entry,
+             textvariable=self.chk_sq_var)
+        chk_btn = ttk.Frame(self._chk_frame)
+        chk_btn.pack(fill="x", pady=4)
+        ttk.Button(chk_btn, text="Capture Frame",
+                   command=self._capture_checker).pack(side="left", padx=4)
+        ttk.Button(chk_btn, text="Clear",
+                   command=self._clear_checker).pack(side="left", padx=4)
+        self.chk_count_var = tk.StringVar(value="0 frames")
+        ttk.Label(self._chk_frame, textvariable=self.chk_count_var).pack(anchor="w")
+
+        ttk.Button(cal_sec, text="Apply Calibration",
+                   command=self._apply_cal).pack(anchor="w", pady=4)
+        self.cal_status_var = tk.StringVar(value="Not calibrated")
+        ttk.Label(cal_sec, textvariable=self.cal_status_var,
+                   foreground="gray").pack(anchor="w")
 
         # ── live preview ──────────────────────────────────────────────────────
         prev_sec = _section(self, "Live Preview")
-        self.preview_label = ttk.Label(prev_sec,
-                                        text="Select a camera and click preview")
-        self.preview_label.pack()
-        btn_f = ttk.Frame(prev_sec)
-        btn_f.pack()
-        ttk.Button(btn_f, text="Start Preview",
+        self.preview_lbl = ttk.Label(prev_sec,
+                                      text="Open a camera to see preview")
+        self.preview_lbl.pack()
+        btn_row = ttk.Frame(prev_sec)
+        btn_row.pack()
+        ttk.Button(btn_row, text="Start",
                    command=self._start_preview).pack(side="left", padx=4)
-        ttk.Button(btn_f, text="Stop Preview",
+        ttk.Button(btn_row, text="Stop",
                    command=self._stop_preview).pack(side="left", padx=4)
-        self._tk_img = None  # hold reference to prevent GC
 
-    def _add_usb(self):
-        idx = self.usb_idx.get()
-        cam = self.mgr.add_usb(idx)
-        ok = cam.open()
-        self._refresh_list()
-        if not ok:
-            messagebox.showwarning("Camera", f"Could not open USB camera {idx}")
+        self._on_src()
+
+    # ── source switching ──────────────────────────────────────────────────────
+
+    def _on_src(self):
+        if self.src_type.get() == "usb":
+            self._ip_row.pack_forget()
+            self._usb_row.pack(fill="x", pady=2)
+        else:
+            self._usb_row.pack_forget()
+            self._ip_row.pack(fill="x", pady=2)
+
+    def _on_cal_mode(self):
+        if self.cal_mode_var.get() == "fov":
+            self._chk_frame.pack_forget()
+            self._fov_frame.pack(fill="x")
+        else:
+            self._fov_frame.pack_forget()
+            self._chk_frame.pack(fill="x")
 
     def _scan_usb(self):
         found = CameraManager.list_usb_cameras()
-        messagebox.showinfo("USB Scan", f"Found USB cameras at indices: {found or 'none'}")
+        messagebox.showinfo("USB Scan", f"Available indices: {found or 'none'}")
 
-    def _add_ip(self):
-        url = self.ip_url.get().strip()
-        if not url or url == "rtsp://":
-            messagebox.showwarning("Camera", "Enter a valid URL")
-            return
-        cam = self.mgr.add_ip(url)
+    # ── camera open ───────────────────────────────────────────────────────────
+
+    def _open_cam(self):
+        if self._cam:
+            self._cam.close()
+        mgr = CameraManager()
+        if self.src_type.get() == "usb":
+            cam = mgr.add_usb(self.usb_idx_var.get())
+        else:
+            url = self.ip_url_var.get().strip()
+            if not url or url == "rtsp://":
+                messagebox.showwarning("Camera", "Enter a valid URL")
+                return
+            cam = mgr.add_ip(url)
         ok = cam.open()
-        self._refresh_list()
         if not ok:
-            messagebox.showwarning("Camera", f"Could not open: {url}")
-
-    def _remove(self):
-        sel = self.tree.selection()
-        if not sel:
+            messagebox.showwarning("Camera", "Could not open camera")
             return
-        cam_id = self.tree.item(sel[0])["values"][0]
-        self.mgr.remove(str(cam_id))
-        self._refresh_list()
+        self._cam = cam
+        self.app.camera = cam
+        self.cam_status_var.set(
+            f"Opened: {cam.info.label}  ({cam.info.width}×{cam.info.height})"
+        )
 
-    def _refresh_list(self):
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        for cam in self.mgr.cameras():
-            res = f"{cam.info.width}×{cam.info.height}" if cam.info.width else "?"
-            status = "open" if cam.is_open else "error"
-            self.tree.insert("", "end",
-                             values=(cam.info.cam_id, cam.info.label, res, status))
-        self.app.camera_mgr = self.mgr
+    # ── calibration ───────────────────────────────────────────────────────────
+
+    def _capture_checker(self):
+        if not self._cam or not self._cam.is_open:
+            messagebox.showwarning("Camera", "Open a camera first")
+            return
+        frame = self._cam.read()
+        if frame is None:
+            messagebox.showwarning("Camera", "Could not read frame")
+            return
+        self._checker_imgs.append(frame)
+        self.chk_count_var.set(f"{len(self._checker_imgs)} frames")
+
+    def _clear_checker(self):
+        self._checker_imgs.clear()
+        self.chk_count_var.set("0 frames")
+
+    def _apply_cal(self):
+        cam = self._cam
+        if not cam:
+            messagebox.showwarning("Calibrate", "Open a camera first")
+            return
+        try:
+            if self.cal_mode_var.get() == "fov":
+                K = _make_K(cam.info.width, cam.info.height, self.fov_var.get())
+                dist = np.zeros(5, dtype=np.float64)
+                self.app.camera_K = K
+                self.app.camera_dist = dist
+                self.cal_status_var.set(
+                    f"FOV estimate: {self.fov_var.get()}°  "
+                    f"fx={K[0,0]:.0f}px"
+                )
+            else:
+                if len(self._checker_imgs) < 4:
+                    messagebox.showwarning("Calibrate", "Capture ≥4 frames first")
+                    return
+                cfg = CheckerboardConfig(
+                    rows=self.chk_rows_var.get(),
+                    cols=self.chk_cols_var.get(),
+                    square_size_m=self.chk_sq_var.get(),
+                )
+                K, dist = calibrate_camera_intrinsics(self._checker_imgs, cfg)
+                self.app.camera_K = K
+                self.app.camera_dist = dist
+                self.cal_status_var.set(
+                    f"Checkerboard: {len(self._checker_imgs)} frames  "
+                    f"fx={K[0,0]:.0f}px"
+                )
+        except Exception as e:
+            messagebox.showerror("Calibrate", str(e))
+
+    # ── preview ───────────────────────────────────────────────────────────────
 
     def _start_preview(self):
-        sel = self.tree.selection()
-        if not sel:
-            messagebox.showinfo("Preview", "Select a camera row first")
+        if not self._cam or not self._cam.is_open:
+            messagebox.showinfo("Preview", "Open a camera first")
             return
-        cam_id = str(self.tree.item(sel[0])["values"][0])
-        cam = self.mgr.get(cam_id)
-        if cam is None or not cam.is_open:
-            return
-        self._preview_running = True
-        self._preview_cam = cam
         self._tick_preview()
 
     def _stop_preview(self):
-        self._preview_running = False
         if self._preview_job:
             self.after_cancel(self._preview_job)
-        self.preview_label.configure(image="",
-                                      text="Preview stopped")
+            self._preview_job = None
+        self.preview_lbl.configure(image="", text="Preview stopped")
 
     def _tick_preview(self):
-        if not self._preview_running:
+        if not self._cam or not self._cam.is_open:
             return
-        frame = self._preview_cam.read()
+        frame = self._cam.read()
         if frame is not None and _PIL_OK:
-            tk_img = _frame_to_tk(frame, 400, 300)
+            tk_img = _frame_to_tk(frame)
             if tk_img:
                 self._tk_img = tk_img
-                self.preview_label.configure(image=tk_img, text="")
-        self._preview_job = self.after(66, self._tick_preview)  # ~15 fps
+                self.preview_lbl.configure(image=tk_img, text="")
+        self._preview_job = self.after(66, self._tick_preview)
 
 
-class CalibrateTab(ttk.Frame):
-    def __init__(self, parent, app):
+# ── Tab 3: Sessions ───────────────────────────────────────────────────────────
+
+class _SessionDialog(tk.Toplevel):
+    """Small dialog to enter camera position for a new session."""
+
+    def __init__(self, parent, session_id: int, can_autopnp: bool):
         super().__init__(parent)
-        self.app = app
-        self.calibrations: Dict[str, CameraCalib] = {}
+        self.title(f"Session {session_id} — Camera Position")
+        self.resizable(False, False)
+        self.grab_set()
+        self.result = None  # (angle, dist, height, use_pnp)
 
-        mode_sec = _section(self, "Calibration Mode")
-        self.mode_var = tk.StringVar(value="simple")
-        ttk.Radiobutton(mode_sec, text="Simple (baseline + FOV)",
-                         variable=self.mode_var, value="simple",
-                         command=self._on_mode).pack(anchor="w")
-        ttk.Radiobutton(mode_sec, text="Checkerboard (accurate)",
-                         variable=self.mode_var, value="checker",
-                         command=self._on_mode).pack(anchor="w")
+        note = ("Where is the camera?\n"
+                "Stand around the tree and estimate your position.")
+        ttk.Label(self, text=note, justify="left",
+                   padding=8).grid(row=0, column=0, columnspan=2, sticky="w")
 
-        # ── simple panel ──────────────────────────────────────────────────────
-        self.simple_frame = ttk.Frame(self)
-        sf = _section(self.simple_frame, "Simple Stereo Setup")
-        note = ("Place Camera 1 at the left, Camera 2 at the right.\n"
-                "Measure the horizontal distance between them.\n"
-                "Both should face the tree at the same height.")
-        ttk.Label(sf, text=note, justify="left",
-                   foreground="gray").pack(anchor="w", pady=4)
+        self.angle_var = tk.DoubleVar(value=0.0)
+        self.dist_var  = tk.DoubleVar(value=2.0)
+        self.height_var = tk.DoubleVar(value=1.2)
+        self.pnp_var   = tk.BooleanVar(value=can_autopnp)
 
-        self.baseline_var = tk.DoubleVar(value=1.5)
-        self.fov_var = tk.DoubleVar(value=70.0)
-        self.height_offset_var = tk.DoubleVar(value=0.0)
+        fields = [
+            ("Angle (0=front, clockwise °):", self.angle_var,  0,   360, 15),
+            ("Distance from tree (m):",        self.dist_var,  0.3,  20, 0.1),
+            ("Camera height (m):",             self.height_var, 0.1, 5,  0.1),
+        ]
+        for r, (lbl, var, lo, hi, inc) in enumerate(fields, start=1):
+            ttk.Label(self, text=lbl, anchor="w").grid(
+                row=r, column=0, sticky="w", padx=8, pady=3)
+            ttk.Spinbox(self, from_=lo, to=hi, increment=inc,
+                         textvariable=var, width=10).grid(
+                row=r, column=1, padx=8, pady=3)
 
-        _row(sf, "Baseline (metres):", ttk.Spinbox,
-             from_=0.1, to=20.0, increment=0.1,
-             textvariable=self.baseline_var, width=10)
-        _row(sf, "Horiz. FOV (degrees):", ttk.Spinbox,
-             from_=20, to=170, increment=1,
-             textvariable=self.fov_var, width=10)
-        _row(sf, "Cam2 height offset (m):", ttk.Spinbox,
-             from_=-5.0, to=5.0, increment=0.1,
-             textvariable=self.height_offset_var, width=10)
+        if can_autopnp:
+            r += 1
+            ttk.Checkbutton(
+                self,
+                text="Auto-locate camera from known pixels (PnP)",
+                variable=self.pnp_var,
+            ).grid(row=r, column=0, columnspan=2, sticky="w", padx=8, pady=4)
+            ttk.Label(self, text="  (No manual position needed if ≥6 pixels already mapped)",
+                       foreground="gray").grid(
+                row=r+1, column=0, columnspan=2, sticky="w", padx=16)
 
-        ttk.Label(sf, text="Camera 1 ID:", width=22).pack(anchor="w")
-        self.cam1_combo = ttk.Combobox(sf, width=20, state="readonly")
-        self.cam1_combo.pack(anchor="w", pady=2)
-        ttk.Label(sf, text="Camera 2 ID:", width=22).pack(anchor="w")
-        self.cam2_combo = ttk.Combobox(sf, width=20, state="readonly")
-        self.cam2_combo.pack(anchor="w", pady=2)
+        ttk.Button(self, text="Run Scan", command=self._ok).grid(
+            row=10, column=0, pady=8)
+        ttk.Button(self, text="Cancel", command=self.destroy).grid(
+            row=10, column=1, pady=8)
 
-        self.simple_frame.pack(fill="x")
+        self.wait_window()
 
-        # ── checker panel ─────────────────────────────────────────────────────
-        self.checker_frame = ttk.Frame(self)
-        cf = _section(self.checker_frame, "Checkerboard Calibration")
-        ttk.Label(cf, text="Print an asymmetric checkerboard (default 9×6).\n"
-                            "Move it to 10+ positions for each camera.\n"
-                            "Click 'Capture' while checkerboard is visible.",
-                   justify="left", foreground="gray").pack(anchor="w", pady=4)
-
-        self.checker_rows_var = tk.IntVar(value=9)
-        self.checker_cols_var = tk.IntVar(value=6)
-        self.checker_sq_var = tk.DoubleVar(value=0.025)
-        _row(cf, "Inner corners (rows):", ttk.Spinbox,
-             from_=3, to=20, textvariable=self.checker_rows_var, width=6)
-        _row(cf, "Inner corners (cols):", ttk.Spinbox,
-             from_=3, to=20, textvariable=self.checker_cols_var, width=6)
-        _row(cf, "Square size (metres):", ttk.Entry,
-             textvariable=self.checker_sq_var)
-
-        self._checker_imgs_1: list = []
-        self._checker_imgs_2: list = []
-        self.checker_count_var = tk.StringVar(value="0 pairs captured")
-        btn_cf = ttk.Frame(cf)
-        btn_cf.pack(fill="x", pady=4)
-        ttk.Button(btn_cf, text="Capture Pair",
-                   command=self._capture_checker_pair).pack(side="left", padx=4)
-        ttk.Button(btn_cf, text="Clear",
-                   command=self._clear_checker).pack(side="left", padx=4)
-        ttk.Label(cf, textvariable=self.checker_count_var).pack(anchor="w")
-
-        # ── apply button ──────────────────────────────────────────────────────
-        btn_row = ttk.Frame(self)
-        btn_row.pack(fill="x", padx=8, pady=8)
-        ttk.Button(btn_row, text="Apply Calibration",
-                   command=self._apply).pack(side="left", padx=4)
-        self.calib_status = tk.StringVar(value="Not calibrated")
-        ttk.Label(btn_row, textvariable=self.calib_status,
-                   foreground="gray").pack(side="left", padx=8)
-
-        self._on_mode()
-
-    def _on_mode(self):
-        if self.mode_var.get() == "simple":
-            self.checker_frame.pack_forget()
-            self.simple_frame.pack(fill="x")
-        else:
-            self.simple_frame.pack_forget()
-            self.checker_frame.pack(fill="x")
-        self._refresh_combos()
-
-    def _refresh_combos(self):
-        mgr = self.app.camera_mgr
-        ids = [c.info.cam_id for c in mgr.cameras()] if mgr else []
-        self.cam1_combo["values"] = ids
-        self.cam2_combo["values"] = ids
-        if len(ids) >= 1:
-            self.cam1_combo.current(0)
-        if len(ids) >= 2:
-            self.cam2_combo.current(1)
-
-    def _apply(self):
-        self._refresh_combos()
-        mgr = self.app.camera_mgr
-        if not mgr or len(mgr) < 2:
-            messagebox.showwarning("Calibrate",
-                                   "Add at least 2 cameras first")
-            return
-        try:
-            if self.mode_var.get() == "simple":
-                self._apply_simple(mgr)
-            else:
-                self._apply_checker(mgr)
-        except Exception as e:
-            messagebox.showerror("Calibrate", str(e))
-            log.exception("Calibration error")
-
-    def _apply_simple(self, mgr):
-        c1_id = self.cam1_combo.get()
-        c2_id = self.cam2_combo.get()
-        if not c1_id or not c2_id or c1_id == c2_id:
-            raise ValueError("Select two different cameras")
-        c1 = mgr.get(c1_id)
-        c2 = mgr.get(c2_id)
-        cfg = SimpleStereoConfig(
-            cam1_id=c1_id, cam2_id=c2_id,
-            cam1_width=c1.info.width, cam1_height=c1.info.height,
-            cam2_width=c2.info.width, cam2_height=c2.info.height,
-            baseline_m=self.baseline_var.get(),
-            hfov_deg=self.fov_var.get(),
-            cam2_height_offset_m=self.height_offset_var.get(),
+    def _ok(self):
+        self.result = (
+            self.angle_var.get(),
+            self.dist_var.get(),
+            self.height_var.get(),
+            self.pnp_var.get(),
         )
-        self.calibrations = build_simple_stereo(cfg)
-        self.app.calibrations = self.calibrations
-        self.calib_status.set(
-            f"Simple stereo: {c1_id} ↔ {c2_id}  baseline={cfg.baseline_m}m  FOV={cfg.hfov_deg}°"
-        )
-
-    def _capture_checker_pair(self):
-        mgr = self.app.camera_mgr
-        if not mgr or len(mgr) < 2:
-            messagebox.showwarning("Calibrate", "Need 2 cameras")
-            return
-        cams = mgr.cameras()
-        f1 = cams[0].read()
-        f2 = cams[1].read()
-        if f1 is None or f2 is None:
-            messagebox.showwarning("Calibrate", "Could not read frames")
-            return
-        self._checker_imgs_1.append(f1)
-        self._checker_imgs_2.append(f2)
-        n = len(self._checker_imgs_1)
-        self.checker_count_var.set(f"{n} pair(s) captured")
-
-    def _clear_checker(self):
-        self._checker_imgs_1.clear()
-        self._checker_imgs_2.clear()
-        self.checker_count_var.set("0 pairs captured")
-
-    def _apply_checker(self, mgr):
-        from .triangulate import calibrate_stereo_pair, CheckerboardConfig
-        if len(self._checker_imgs_1) < 4:
-            raise ValueError("Capture at least 4 checkerboard pairs first")
-        cams = mgr.cameras()
-        cfg = CheckerboardConfig(
-            rows=self.checker_rows_var.get(),
-            cols=self.checker_cols_var.get(),
-            square_size_m=self.checker_sq_var.get(),
-        )
-        self.calibrations = calibrate_stereo_pair(
-            self._checker_imgs_1, self._checker_imgs_2, cfg,
-            cam1_id=cams[0].info.cam_id,
-            cam2_id=cams[1].info.cam_id,
-        )
-        self.app.calibrations = self.calibrations
-        self.calib_status.set(
-            f"Checkerboard: {len(self._checker_imgs_1)} pairs — calibrated OK"
-        )
+        self.destroy()
 
 
-class ScanTab(ttk.Frame):
+class SessionsTab(ttk.Frame):
     def __init__(self, parent, app):
         super().__init__(parent)
         self.app = app
         self._running = False
-        self._thread: Optional[threading.Thread] = None
         self._q: queue.Queue = queue.Queue()
 
-        ctrl_sec = _section(self, "Scan Controls")
-        btn_row = ttk.Frame(ctrl_sec)
-        btn_row.pack(fill="x", pady=4)
-        self.start_btn = ttk.Button(btn_row, text="▶  Start Scan",
-                                     command=self._start)
-        self.start_btn.pack(side="left", padx=4)
-        self.stop_btn = ttk.Button(btn_row, text="⏹  Stop",
-                                    command=self._stop, state="disabled")
-        self.stop_btn.pack(side="left", padx=4)
+        # ── session list ──────────────────────────────────────────────────────
+        list_sec = _section(self, "Scan Sessions")
 
-        prog_sec = _section(self, "Progress")
-        self.progress_var = tk.DoubleVar(value=0)
-        self.progress = ttk.Progressbar(prog_sec,
-                                         variable=self.progress_var,
-                                         maximum=100)
-        self.progress.pack(fill="x")
-        self.progress_label = tk.StringVar(value="Ready")
-        ttk.Label(prog_sec, textvariable=self.progress_label).pack(anchor="w")
+        cols = ("id", "position", "detected", "coverage", "auto")
+        self.tree = ttk.Treeview(list_sec, columns=cols, show="headings", height=5)
+        for col, (hdr, w) in zip(cols, [
+            ("ID", 40), ("Position", 180), ("Detected", 75),
+            ("Coverage", 80), ("Located", 60)
+        ]):
+            self.tree.heading(col, text=hdr)
+            self.tree.column(col, width=w)
+        self.tree.pack(fill="x")
 
+        btn_sec = ttk.Frame(self)
+        btn_sec.pack(fill="x", padx=8, pady=4)
+        self.add_btn = ttk.Button(btn_sec, text="▶  New Session",
+                                   command=self._new_session)
+        self.add_btn.pack(side="left", padx=4)
+        ttk.Button(btn_sec, text="Remove Last",
+                   command=self._remove_last).pack(side="left", padx=4)
+
+        # ── confidence gauge ──────────────────────────────────────────────────
+        conf_sec = _section(self, "Model Confidence")
+
+        self.conf_pct_var = tk.StringVar(value="—")
+        self.conf_grade_var = tk.StringVar(value="Add sessions to begin")
+        ttk.Label(conf_sec, textvariable=self.conf_pct_var,
+                   font=("", 28, "bold")).pack(anchor="w", padx=4)
+        ttk.Label(conf_sec, textvariable=self.conf_grade_var,
+                   font=("", 11), foreground="gray").pack(anchor="w", padx=4)
+
+        detail_frame = ttk.Frame(conf_sec)
+        detail_frame.pack(fill="x", pady=4)
+        self.conf_detail_var = tk.StringVar(value="")
+        ttk.Label(detail_frame, textvariable=self.conf_detail_var,
+                   justify="left").pack(anchor="w")
+
+        # Color key
+        key_frame = ttk.Frame(conf_sec)
+        key_frame.pack(anchor="w", pady=2)
+        for label, color in [("High", "#22c55e"), ("Medium", "#eab308"),
+                              ("Low", "#ef4444"), ("Unseen", "#9ca3af")]:
+            dot = tk.Label(key_frame, text="●", foreground=color)
+            dot.pack(side="left")
+            tk.Label(key_frame, text=f" {label}   ").pack(side="left")
+
+        # ── mini 3D view ──────────────────────────────────────────────────────
+        view_sec = _section(self, "Live 3D View  (updates after each session)")
+        if _MPL_OK:
+            self.fig = Figure(figsize=(5, 3.5), dpi=88)
+            self.ax = self.fig.add_subplot(111, projection="3d")
+            self.canvas = FigureCanvasTkAgg(self.fig, master=view_sec)
+            self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        else:
+            ttk.Label(view_sec, text="Install matplotlib for 3D preview").pack()
+
+        # ── progress log ──────────────────────────────────────────────────────
         log_sec = _section(self, "Log")
-        self.log_box = scrolledtext.ScrolledText(log_sec, height=10, state="disabled",
+        self.log_box = scrolledtext.ScrolledText(log_sec, height=6, state="disabled",
                                                   font=("Courier", 9))
         self.log_box.pack(fill="both", expand=True)
+
+        # scan progress bar (hidden until running)
+        self.progress_var = tk.DoubleVar(value=0)
+        self.progress_lbl = tk.StringVar(value="")
+        self._prog_bar = ttk.Progressbar(self, variable=self.progress_var, maximum=100)
+        self._prog_lbl_widget = ttk.Label(self, textvariable=self.progress_lbl)
+
+    # ── session list helpers ──────────────────────────────────────────────────
 
     def _log(self, msg: str):
         self.log_box.configure(state="normal")
@@ -506,76 +522,139 @@ class ScanTab(ttk.Frame):
         self.log_box.see("end")
         self.log_box.configure(state="disabled")
 
-    def _start(self):
-        mgr = self.app.camera_mgr
-        calibs = self.app.calibrations
-        if not mgr or len(mgr) < 2:
-            messagebox.showwarning("Scan", "Add at least 2 cameras first")
+    def _refresh_list(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        for sess in self.app.sessions:
+            n_det = len(sess.detected_pixels)
+            n_tot = self.app.ctrl_tab.get_config().pixel_count
+            cov = f"{100*n_det/max(n_tot,1):.0f}%"
+            loc = "PnP" if sess.auto_located else f"{sess.angle_deg:.0f}°/{sess.distance_m:.1f}m"
+            self.tree.insert("", "end", values=(
+                sess.session_id, loc, n_det, cov,
+                "auto" if sess.auto_located else "manual"
+            ))
+
+    def _remove_last(self):
+        if not self.app.sessions:
             return
-        if not calibs:
-            messagebox.showwarning("Scan", "Calibrate cameras first")
+        self.app.sessions.pop()
+        self._refresh_list()
+        self._rebuild()
+
+    # ── new session ───────────────────────────────────────────────────────────
+
+    def _new_session(self):
+        if not self.app.camera or not self.app.camera.is_open:
+            messagebox.showwarning("Session", "Open a camera on the Camera tab first")
+            return
+        if self.app.camera_K is None:
+            messagebox.showwarning("Session", "Apply camera calibration first")
+            return
+        if self._running:
             return
 
-        ctrl_cfg = self.app.ctrl_tab.get_config()
-        self.app.controller = PixelController(ctrl_cfg)
-        try:
-            info = self.app.controller.connect()
-            self._log(f"Controller: {info['host']}, FPP={info['fpp_detected']}")
-        except Exception as e:
-            messagebox.showerror("Scan", f"Cannot connect to controller:\n{e}")
+        can_pnp = len(self.app.sessions) >= 2 and bool(self.app.pixel_results)
+        session_id = len(self.app.sessions) + 1
+
+        dlg = _SessionDialog(self, session_id, can_pnp)
+        if dlg.result is None:
             return
+
+        angle, dist, height, use_pnp = dlg.result
+        sess = ScanSession(
+            session_id=session_id,
+            angle_deg=angle,
+            distance_m=dist,
+            height_m=height,
+        )
+        self.app.sessions.append(sess)
+
+        self._run_session(sess, use_pnp)
+
+    def _run_session(self, sess: ScanSession, use_pnp: bool):
+        ctrl_cfg = self.app.ctrl_tab.get_config()
+        cam = self.app.camera
+        K = self.app.camera_K
+        dist_coef = self.app.camera_dist
 
         self._running = True
-        self.start_btn.configure(state="disabled")
-        self.stop_btn.configure(state="normal")
-        self.app.scan_results = []
+        self.add_btn.configure(state="disabled")
+        self._prog_bar.pack(fill="x", padx=8)
+        self._prog_lbl_widget.pack(padx=8, anchor="w")
 
-        self._thread = threading.Thread(target=self._scan_worker,
-                                         args=(ctrl_cfg, mgr, calibs),
-                                         daemon=True)
-        self._thread.start()
+        self._q = queue.Queue()
+        t = threading.Thread(
+            target=self._scan_worker,
+            args=(sess, use_pnp, ctrl_cfg, cam, K, dist_coef),
+            daemon=True,
+        )
+        t.start()
         self._poll()
 
-    def _stop(self):
-        self._running = False
-
-    def _scan_worker(self, ctrl_cfg: ControllerConfig,
-                     mgr: CameraManager,
-                     calibs: Dict[str, CameraCalib]):
+    def _scan_worker(self, sess: ScanSession, use_pnp: bool,
+                     ctrl_cfg: ControllerConfig, cam: Camera,
+                     K: np.ndarray, dist_coef: np.ndarray):
         ctrl = PixelController(ctrl_cfg)
         ctrl.connect()
         try:
-            cameras = [c for c in mgr.cameras() if c.is_open]
             detector = LEDDetector()
             n = ctrl_cfg.pixel_count
-            delay = ctrl_cfg.inter_pixel_delay
 
-            self._q.put(("log", "Capturing background frames…"))
+            self._q.put(("log", f"Session {sess.session_id}: capturing background…"))
             ctrl.blackout()
             time.sleep(0.3)
-            backgrounds = capture_backgrounds(cameras)
-            self._q.put(("log", f"Background captured for {len(backgrounds)} camera(s)"))
+            # Single camera — wrap in list for capture helpers
+            backgrounds = {}
+            for _ in range(3):  # burn a few frames for exposure settle
+                cam.read()
+            bg = cam.read_gray()
+            if bg is None:
+                self._q.put(("error", "Could not read camera"))
+                return
+            backgrounds[cam.info.cam_id] = bg
 
-            captures: List[PixelCapture] = []
+            captures = []
             for i in range(n):
                 if not self._running:
-                    self._q.put(("log", "Scan stopped by user"))
+                    self._q.put(("log", "Stopped."))
                     break
                 ctrl.light_pixel(i)
-                time.sleep(delay)
-                cap = scan_pixel(i, cameras, backgrounds, detector)
+                time.sleep(ctrl_cfg.inter_pixel_delay)
+                cap = scan_pixel(i, [cam], backgrounds, detector)
                 ctrl.blackout()
                 captures.append(cap)
-
                 pct = (i + 1) / n * 100
-                det_count = cap.camera_count
-                self._q.put(("progress", pct, i, n, det_count))
+                self._q.put(("progress", pct, i + 1, n, cap.camera_count))
 
-            self._q.put(("log", f"Scan complete: {len(captures)} pixels"))
-            self._q.put(("done", captures))
+            sess.captures = captures
+            n_det = len(sess.detected_pixels)
+            self._q.put(("log", f"Session {sess.session_id}: {n_det}/{n} pixels detected"))
+
+            # ── calibrate this session ────────────────────────────────────────
+            if use_pnp and self.app.pixel_results:
+                known = {idx: r.position
+                         for idx, r in self.app.pixel_results.items()
+                         if r.position is not None}
+                calib = locate_session_pnp(sess, known, K, dist_coef)
+                if calib:
+                    sess.calib = calib
+                    sess.auto_located = True
+                    self._q.put(("log", f"  PnP auto-located camera ✓"))
+                else:
+                    self._q.put(("log", "  PnP failed — using manual position"))
+
+            if sess.calib is None:
+                sess.calib = build_session_calib(sess, K, dist_coef)
+                self._q.put(("log",
+                    f"  Manual position: {sess.angle_deg:.0f}°, "
+                    f"{sess.distance_m:.1f}m, h={sess.height_m:.1f}m"))
+
+            self._q.put(("done",))
+
         except Exception as e:
             self._q.put(("error", str(e)))
-            log.exception("Scan worker error")
+            log.exception("Session worker error")
         finally:
             ctrl.disconnect()
 
@@ -587,129 +666,229 @@ class ScanTab(ttk.Frame):
                 if kind == "progress":
                     _, pct, i, n, det = msg
                     self.progress_var.set(pct)
-                    self.progress_label.set(
-                        f"Pixel {i+1}/{n} — detected in {det} camera(s)"
+                    self.progress_lbl.set(
+                        f"Pixel {i}/{n}  —  {'detected' if det else 'not seen'}"
                     )
                 elif kind == "log":
                     self._log(msg[1])
                 elif kind == "done":
-                    self._scan_done(msg[1])
+                    self._session_done()
                     return
                 elif kind == "error":
                     messagebox.showerror("Scan Error", msg[1])
-                    self._scan_done([])
+                    self._session_done()
                     return
         except queue.Empty:
             pass
         if self._running:
-            self.after(100, self._poll)
+            self.after(80, self._poll)
 
-    def _scan_done(self, captures):
+    def _session_done(self):
         self._running = False
-        self.start_btn.configure(state="normal")
-        self.stop_btn.configure(state="disabled")
-        if captures:
-            self.app.scan_results = captures
-            self._log("Triangulating…")
-            positions = triangulate_all(captures, self.app.calibrations)
-            positions = remove_outliers(positions)
-            positions = normalize_positions(positions)
-            self.app.positions = positions
-            self._log(f"Triangulated {len(positions)} pixel positions")
-            self.app.notebook.select(4)   # jump to Results tab
-        else:
-            self._log("No captures — nothing to triangulate")
+        self.add_btn.configure(state="normal")
+        self._prog_bar.pack_forget()
+        self._prog_lbl_widget.pack_forget()
+        self._refresh_list()
+        self._rebuild()
+
+    # ── rebuild model ─────────────────────────────────────────────────────────
+
+    def _rebuild(self):
+        """Triangulate from all sessions and refresh confidence + 3D view."""
+        n_pixels = self.app.ctrl_tab.get_config().pixel_count
+        calibrated = [s for s in self.app.sessions if s.calib is not None]
+
+        if len(calibrated) < 2:
+            self._log("Need ≥2 sessions to triangulate — add another session.")
+            self._update_confidence(None, n_pixels)
+            return
+
+        results = triangulate_sessions(self.app.sessions, n_pixels)
+        self.app.pixel_results = results
+
+        mc = compute_model_confidence(results, n_pixels)
+        self.app.model_confidence = mc
+
+        self._update_confidence(mc, n_pixels)
+        self._update_3d(results, mc)
+        self._log(
+            f"→ Model: {mc.score_pct}% confidence  |  "
+            f"high={mc.high_count} med={mc.medium_count} "
+            f"low={mc.low_count} unseen={mc.unseen_count}"
+        )
+
+    def _update_confidence(self, mc: Optional[ModelConfidence], total: int):
+        if mc is None:
+            self.conf_pct_var.set("—")
+            self.conf_grade_var.set("Add sessions to begin")
+            self.conf_detail_var.set("")
+            return
+
+        self.conf_pct_var.set(f"{mc.score_pct}%")
+        self.conf_grade_var.set(mc.grade)
+        self.conf_detail_var.set(
+            f"Coverage: {mc.coverage*100:.0f}%   "
+            f"({mc.high_count} high / {mc.medium_count} medium / "
+            f"{mc.low_count} low / {mc.unseen_count} unseen)\n"
+            f"Avg reprojection error: {mc.mean_reprojection_px:.1f} px"
+        )
+
+    def _update_3d(self, results: Dict[int, PixelResult], mc: ModelConfidence):
+        if not _MPL_OK:
+            return
+
+        self.ax.clear()
+
+        # Sort pixels by confidence label for legend grouping
+        groups: Dict[str, list] = {"high": [], "medium": [], "low": [], "unseen": []}
+        for r in results.values():
+            if r.position is not None:
+                groups[r.confidence_label].append(r)
+            else:
+                groups["unseen"].append(r)
+
+        for label, color in CONF_COLORS.items():
+            grp = groups[label]
+            if not grp:
+                continue
+            has_pos = [r for r in grp if r.position is not None]
+            if not has_pos:
+                continue
+            pts = np.array([r.position for r in has_pos])
+            self.ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
+                            c=color, s=8, alpha=0.85, label=label)
+
+        self.ax.set_xlabel("X", fontsize=7)
+        self.ax.set_ylabel("Y", fontsize=7)
+        self.ax.set_zlabel("Z", fontsize=7)
+        self.ax.tick_params(labelsize=6)
+        n_sess = len([s for s in self.app.sessions if s.calib])
+        self.ax.set_title(f"{mc.score_pct}% confidence  |  {n_sess} session(s)",
+                          fontsize=9)
+        self.ax.legend(fontsize=7, loc="upper left")
+        self.canvas.draw()
 
 
-class ResultsTab(ttk.Frame):
+# ── Tab 4: Export ─────────────────────────────────────────────────────────────
+
+class ExportTab(ttk.Frame):
     def __init__(self, parent, app):
         super().__init__(parent)
         self.app = app
 
-        # ── 3D viewer ─────────────────────────────────────────────────────────
-        view_sec = _section(self, "3D Point Cloud")
+        # ── final 3D view ─────────────────────────────────────────────────────
+        view_sec = _section(self, "Final 3D Model")
         if _MPL_OK:
             self.fig = Figure(figsize=(5, 4), dpi=90)
             self.ax = self.fig.add_subplot(111, projection="3d")
             self.canvas = FigureCanvasTkAgg(self.fig, master=view_sec)
             self.canvas.get_tk_widget().pack(fill="both", expand=True)
         else:
-            ttk.Label(view_sec,
-                       text="Install matplotlib for 3D preview").pack()
+            ttk.Label(view_sec, text="Install matplotlib for preview").pack()
 
         ttk.Button(view_sec, text="Refresh View",
-                   command=self._refresh_view).pack(pady=4)
+                   command=self._refresh).pack(pady=4)
 
-        # ── stats ─────────────────────────────────────────────────────────────
-        stat_sec = _section(self, "Statistics")
-        self.stats_var = tk.StringVar(value="No results yet")
-        ttk.Label(stat_sec, textvariable=self.stats_var,
+        # ── confidence summary ────────────────────────────────────────────────
+        sum_sec = _section(self, "Summary")
+        self.summary_var = tk.StringVar(value="Run sessions first")
+        ttk.Label(sum_sec, textvariable=self.summary_var,
                    justify="left").pack(anchor="w")
 
-        # ── export ────────────────────────────────────────────────────────────
+        # ── export options ────────────────────────────────────────────────────
         exp_sec = _section(self, "Export")
         self.model_name_var = tk.StringVar(value="BlinkyTree")
+        self.min_conf_var = tk.DoubleVar(value=0.0)
         _row(exp_sec, "Model name:", ttk.Entry, textvariable=self.model_name_var)
+        _row(exp_sec, "Min confidence filter:", ttk.Spinbox,
+             from_=0.0, to=1.0, increment=0.05,
+             textvariable=self.min_conf_var, width=8)
+        ttk.Label(exp_sec,
+                   text="(0.0 = include all triangulated pixels)",
+                   foreground="gray").pack(anchor="w")
 
         btn_row = ttk.Frame(exp_sec)
-        btn_row.pack(fill="x", pady=4)
-        ttk.Button(btn_row, text="Export xModel + CSV",
+        btn_row.pack(fill="x", pady=6)
+        ttk.Button(btn_row, text="Export xModel + CSV + PLY",
                    command=self._export).pack(side="left", padx=4)
-        self.export_status = tk.StringVar(value="")
-        ttk.Label(exp_sec, textvariable=self.export_status,
+
+        self.export_status_var = tk.StringVar(value="")
+        ttk.Label(exp_sec, textvariable=self.export_status_var,
                    foreground="green").pack(anchor="w")
 
-    def _refresh_view(self):
-        positions = self.app.positions
-        if not positions:
-            messagebox.showinfo("Results", "No positions yet — run a scan first")
+    def _refresh(self):
+        results = self.app.pixel_results
+        mc = self.app.model_confidence
+        if not results or mc is None:
+            messagebox.showinfo("Export", "Run sessions first")
             return
 
-        pts = np.array([positions[k] for k in sorted(positions)])
-        n = len(pts)
+        self._draw(results, mc)
 
-        if _MPL_OK:
-            self.ax.clear()
-            sc = self.ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
-                                  c=np.arange(n), cmap="rainbow",
-                                  s=10, alpha=0.8)
-            self.ax.set_xlabel("X")
-            self.ax.set_ylabel("Y (height)")
-            self.ax.set_zlabel("Z")
-            self.ax.set_title(f"BlinkyMap — {n} pixels")
-            self.canvas.draw()
-
-        # Stats
-        y = pts[:, 1]
-        tree_h = y.max() - y.min()
-        r = np.sqrt(pts[:, 0] ** 2 + pts[:, 2] ** 2)
-        self.stats_var.set(
-            f"Pixels: {n}   |   "
-            f"Tree height: {tree_h:.2f} m   |   "
-            f"Max radius: {r.max():.2f} m"
+        n_pixels = self.app.ctrl_tab.get_config().pixel_count
+        self.summary_var.set(
+            f"Overall confidence: {mc.score_pct}%  ({mc.grade})\n"
+            f"Coverage: {mc.coverage*100:.0f}% of {n_pixels} pixels triangulated\n"
+            f"  High: {mc.high_count}    Medium: {mc.medium_count}    "
+            f"Low: {mc.low_count}    Unseen: {mc.unseen_count}\n"
+            f"Avg reprojection error: {mc.mean_reprojection_px:.1f} px\n"
+            f"Sessions used: {len([s for s in self.app.sessions if s.calib is not None])}"
         )
 
+    def _draw(self, results: Dict[int, PixelResult], mc: ModelConfidence):
+        if not _MPL_OK:
+            return
+        self.ax.clear()
+
+        for label, color in CONF_COLORS.items():
+            pts = [r.position for r in results.values()
+                   if r.position is not None and r.confidence_label == label]
+            if pts:
+                arr = np.array(pts)
+                self.ax.scatter(arr[:, 0], arr[:, 1], arr[:, 2],
+                                c=color, s=12, alpha=0.9, label=label)
+
+        self.ax.set_xlabel("X")
+        self.ax.set_ylabel("Y (height)")
+        self.ax.set_zlabel("Z")
+        self.ax.set_title(f"BlinkyMap — {mc.score_pct}% confident")
+        self.ax.legend(fontsize=8)
+        self.canvas.draw()
+
     def _export(self):
-        positions = self.app.positions
-        if not positions:
-            messagebox.showwarning("Export", "No data to export")
+        results = self.app.pixel_results
+        if not results:
+            messagebox.showwarning("Export", "No data — run sessions first")
             return
 
         out_dir = filedialog.askdirectory(title="Select export folder")
         if not out_dir:
             return
 
+        min_c = self.min_conf_var.get()
+        filtered = {
+            idx: r.position for idx, r in results.items()
+            if r.position is not None and r.confidence >= min_c
+        }
+
+        if not filtered:
+            messagebox.showwarning("Export", "No pixels pass the confidence filter")
+            return
+
+        # Normalise (bottom of tree = Y=0)
+        cleaned = remove_outliers(filtered)
+        normalised = normalize_positions(cleaned)
+
         name = self.model_name_var.get().strip() or "BlinkyTree"
+        cfg = self.app.ctrl_tab.get_config()
         try:
-            cfg = self.app.ctrl_tab.get_config()
-            paths = export_all(positions, out_dir, name,
-                               total_pixels=cfg.pixel_count)
-            msg = "Exported:\n" + "\n".join(f"  {k}: {v.name}" for k, v in paths.items())
-            self.export_status.set(f"Saved to {out_dir}")
+            paths = export_all(normalised, out_dir, name, cfg.pixel_count)
+            self.export_status_var.set(f"Saved {len(normalised)} pixels → {out_dir}")
+            msg = f"Exported {len(normalised)} pixels:\n"
+            msg += "\n".join(f"  {k}: {v.name}" for k, v in paths.items())
             messagebox.showinfo("Export Complete", msg)
         except Exception as e:
             messagebox.showerror("Export Error", str(e))
-            log.exception("Export error")
 
 
 # ── Main application ──────────────────────────────────────────────────────────
@@ -718,57 +897,56 @@ class BlinkyMapApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("BlinkyMap — Pixel Tree 3D Mapper")
-        self.root.minsize(600, 580)
+        self.root.minsize(640, 620)
 
         # ── shared state ──────────────────────────────────────────────────────
-        self.controller: Optional[PixelController] = None
-        self.camera_mgr: CameraManager = CameraManager()
-        self.calibrations: Dict[str, CameraCalib] = {}
-        self.scan_results: List[PixelCapture] = []
-        self.positions: Dict[int, np.ndarray] = {}
+        self.camera: Optional[Camera] = None
+        self.camera_K: Optional[np.ndarray] = None
+        self.camera_dist: np.ndarray = np.zeros(5)
+        self.sessions: List[ScanSession] = []
+        self.pixel_results: Dict[int, PixelResult] = {}
+        self.model_confidence: Optional[ModelConfidence] = None
 
         # ── header ────────────────────────────────────────────────────────────
         hdr = ttk.Frame(self.root, relief="groove", padding=6)
         hdr.pack(fill="x", padx=4, pady=(4, 0))
         ttk.Label(hdr, text="BlinkyMap",
                    font=("", 14, "bold")).pack(side="left")
-        ttk.Label(hdr, text="  Pixel Tree → xLights 3D Model",
+        ttk.Label(hdr, text="  Pixel Tree → xLights 3D Model  "
+                  "  (one camera, multiple passes)",
                    foreground="gray").pack(side="left")
 
         # ── notebook ──────────────────────────────────────────────────────────
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill="both", expand=True, padx=4, pady=4)
 
-        self.ctrl_tab = ControllerTab(self.notebook, self)
-        self.cam_tab = CamerasTab(self.notebook, self)
-        self.calib_tab = CalibrateTab(self.notebook, self)
-        self.scan_tab = ScanTab(self.notebook, self)
-        self.results_tab = ResultsTab(self.notebook, self)
+        self.ctrl_tab    = ControllerTab(self.notebook, self)
+        self.cam_tab     = CameraTab(self.notebook, self)
+        self.sess_tab    = SessionsTab(self.notebook, self)
+        self.export_tab  = ExportTab(self.notebook, self)
 
-        for tab, name in [(self.ctrl_tab,    "1. Controller"),
-                          (self.cam_tab,     "2. Cameras"),
-                          (self.calib_tab,   "3. Calibrate"),
-                          (self.scan_tab,    "4. Scan"),
-                          (self.results_tab, "5. Results")]:
+        for tab, name in [
+            (self.ctrl_tab,   "1. Controller"),
+            (self.cam_tab,    "2. Camera"),
+            (self.sess_tab,   "3. Sessions"),
+            (self.export_tab, "4. Export"),
+        ]:
             self.notebook.add(tab, text=name)
 
-        # ── status bar ────────────────────────────────────────────────────────
-        status_bar = ttk.Frame(self.root, relief="sunken", padding=2)
-        status_bar.pack(fill="x", side="bottom")
+        # status bar
+        sb = ttk.Frame(self.root, relief="sunken", padding=2)
+        sb.pack(fill="x", side="bottom")
         self.status_var = tk.StringVar(value="Ready")
-        ttk.Label(status_bar, textvariable=self.status_var,
-                   anchor="w").pack(fill="x")
+        ttk.Label(sb, textvariable=self.status_var, anchor="w").pack(fill="x")
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _on_close(self):
-        if self.controller:
+        if self.camera:
             try:
-                self.controller.disconnect()
+                self.camera.close()
             except Exception:
                 pass
-        if self.camera_mgr:
-            self.camera_mgr.close_all()
         self.root.destroy()
 
     def run(self):
