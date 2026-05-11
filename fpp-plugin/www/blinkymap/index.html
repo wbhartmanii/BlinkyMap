@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>BlinkyMap</title>
+  <link rel="stylesheet" href="style.css" />
+
+  <!-- Import map for Three.js (served locally after install.sh) -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./vendor/three.module.min.js",
+      "three/addons/controls/OrbitControls.js": "./vendor/OrbitControls.js"
+    }
+  }
+  </script>
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header id="app-header">
+  <div class="header-logo">&#128336; BlinkyMap</div>
+  <div id="ws-indicator" class="dot dot-red" title="WebSocket status"></div>
+</header>
+
+<!-- ── Tab bar ── -->
+<nav id="tab-bar">
+  <button class="tab-btn active" data-tab="setup">Setup</button>
+  <button class="tab-btn"        data-tab="scan">Scan</button>
+  <button class="tab-btn"        data-tab="model">3D Model</button>
+  <button class="tab-btn"        data-tab="export">Export</button>
+</nav>
+
+<!-- ══════════════════════════════════════════════════════════════════════════
+     SETUP TAB
+     ══════════════════════════════════════════════════════════════════════════ -->
+<section id="tab-setup" class="tab-panel active">
+  <h2>Controller</h2>
+  <label>FPP / Controller IP
+    <input id="cfg-host" type="text" value="127.0.0.1" inputmode="decimal" />
+  </label>
+  <label>Universe
+    <input id="cfg-universe" type="number" value="1" min="1" max="63999" />
+  </label>
+  <label>Start Channel
+    <input id="cfg-start" type="number" value="1" min="1" max="512" />
+  </label>
+  <label>Pixel Count
+    <input id="cfg-pixels" type="number" value="100" min="1" max="2048" />
+  </label>
+  <label>Capture Delay (s)
+    <input id="cfg-delay" type="number" value="0.15" min="0.05" max="2" step="0.05" />
+  </label>
+  <button class="btn-primary wide" id="btn-save-config">Save &amp; Connect</button>
+
+  <h2>Camera</h2>
+  <label>Horizontal FOV (°)
+    <input id="cfg-fov" type="number" value="60" min="20" max="170" step="1" />
+  </label>
+  <button class="btn-secondary wide" id="btn-open-camera">Open Phone Camera</button>
+  <video id="cam-preview" autoplay playsinline muted></video>
+  <canvas id="cam-canvas" style="display:none"></canvas>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════════════════
+     SCAN TAB
+     ══════════════════════════════════════════════════════════════════════════ -->
+<section id="tab-scan" class="tab-panel">
+  <h2>Session Position</h2>
+  <label>Angle around tree (°)
+    <input id="sess-angle" type="number" value="0" min="0" max="359" step="5" />
+  </label>
+  <label>Distance from trunk (m)
+    <input id="sess-dist" type="number" value="2.0" min="0.5" max="20" step="0.5" />
+  </label>
+  <label>Camera height (m)
+    <input id="sess-height" type="number" value="1.5" min="0.2" max="10" step="0.1" />
+  </label>
+  <button class="btn-primary wide" id="btn-start-session">Start Session</button>
+
+  <div id="scan-progress-block" style="display:none">
+    <div class="progress-bar-wrap">
+      <div id="scan-progress-bar" class="progress-bar"></div>
+    </div>
+    <p id="scan-progress-label">0 / 0</p>
+    <button class="btn-danger wide" id="btn-stop-scan">Stop Scan</button>
+  </div>
+
+  <h2>Sessions</h2>
+  <div id="session-list"></div>
+
+  <div id="confidence-block">
+    <div id="confidence-pct">–</div>
+    <div id="confidence-grade">–</div>
+    <div id="confidence-detail"></div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════════════════
+     MODEL TAB
+     ══════════════════════════════════════════════════════════════════════════ -->
+<section id="tab-model" class="tab-panel">
+  <div id="viewer-container"></div>
+  <div id="pixel-list-wrap">
+    <div class="list-header">
+      <span>Ch#</span><span>Status</span><span>Conf</span><span>Seen</span>
+    </div>
+    <div id="pixel-list"></div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════════════════
+     EXPORT TAB
+     ══════════════════════════════════════════════════════════════════════════ -->
+<section id="tab-export" class="tab-panel">
+  <h2>Export</h2>
+  <p id="export-confidence-label">Run at least 2 sessions to export.</p>
+  <button class="btn-primary wide" id="btn-export-xmodel">Download .xmodel</button>
+  <button class="btn-secondary wide" id="btn-export-csv">Download CSV</button>
+
+  <h2>xLights Import</h2>
+  <ol class="instructions">
+    <li>Open xLights → <strong>Layout</strong> tab.</li>
+    <li>Right-click model list → <strong>Import Model</strong>.</li>
+    <li>Select <code>BlinkyTree.xmodel</code>.</li>
+    <li>The model uses cylindrical-unwrap: rows = height, cols = angle.</li>
+  </ol>
+</section>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
