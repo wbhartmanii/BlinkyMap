@@ -17,13 +17,13 @@ path — your phone browser is the camera, no laptop required.
    ```
    https://github.com/wbhartmanii/blinkymap
    ```
-3. Click **Install** — FPP runs `scripts/fpp_install.sh` which pulls the Python deps and
+3. Click **Install** — FPP runs `install.sh` which pulls the Python deps and
    vendors Three.js locally (needs internet once)
-4. The **BlinkyMap** menu item appears in FPP’s navigation
-5. Open `http://<pi-ip>/plugin/blinkymap/blinkymap/` on your **phone** — that’s the whole UI
+4. The **BlinkyMap** menu item appears in FPP's navigation
+5. Open `http://<pi-ip>/plugin/blinkymap/` on your **phone** — that's the whole UI
 
 > The plugin fires pixels via E1.31 to localhost (zero extra wiring), and your
-> phone’s browser handles the camera and 3D viewer via WebRTC + Three.js.
+> phone's browser handles the camera and 3D viewer via WebRTC + Three.js.
 
 ---
 
@@ -36,7 +36,7 @@ path — your phone browser is the camera, no laptop required.
    - `BlinkyMap-Linux.zip`
 3. Unzip → double-click **BlinkyMap** (or `BlinkyMap.exe` on Windows)
 
-> **Windows note:** You may see a SmartScreen warning because the app isn’t
+> **Windows note:** You may see a SmartScreen warning because the app isn't
 > code-signed yet. Click *More info → Run anyway*.
 
 ---
@@ -48,6 +48,9 @@ pipx install git+https://github.com/wbhartmanii/blinkymap
 blinkymap
 ```
 
+[pipx](https://pipx.pypa.io) installs Python apps in isolated environments.
+Install it once with `pip install pipx` (or `brew install pipx` on Mac).
+
 ---
 
 ### Option 4 — Plain pip
@@ -55,6 +58,7 @@ blinkymap
 ```bash
 pip install git+https://github.com/wbhartmanii/blinkymap
 blinkymap
+# or: python -m blinkymap
 ```
 
 ---
@@ -99,20 +103,23 @@ python main.py
 After every completed session BlinkyMap scores every possible camera angle and
 recommends the single best spot to stand next (height stays the same).
 
+Three factors are weighted:
+
 | Factor | Weight | What it means |
 |--------|--------|---------------|
-| Angular gap | 30 % | Prefer angles far from sessions you’ve already done |
-| Coverage | 50 % | Face the side of the tree with the fewest detected pixels |
+| Angular gap | 30 % | Prefer angles far from sessions you've already done |
+| Coverage | 50 % | Face the side of the tree with the fewest detected pixels — that's where unseen pixels are hiding behind the trunk |
 | Spread | 20 % | Maximise the triangulation baseline for low-confidence pixels |
 
-The suggestion appears as a card in the Scan tab. Tap **Use This Angle** to pre-fill
+The suggestion appears as a card in the Scan tab showing the recommended angle,
+same distance, and a one-line explanation. Tap **Use This Angle** to pre-fill
 the form. In the 3D view a glowing marker shows exactly where to stand.
 
 ---
 
 ## Why multiple sessions?
 
-Pixels hidden behind the trunk won’t be visible from one angle. Walking around
+Pixels hidden behind the trunk won't be visible from one angle. Walking around
 the tree and running 3–4 sessions gives BlinkyMap enough viewpoints to
 triangulate every pixel. The smart suggestion tells you the highest-value spot
 each time so you get a Good model in the fewest possible moves.
@@ -120,42 +127,63 @@ each time so you get a Good model in the fewest possible moves.
 ### Confidence display
 
 | Colour | Meaning |
-|--------|---------|
+|--------|----------|
 | 🟢 Green dot, tiny halo | High confidence — solid triangulation |
 | 🟡 Yellow, small halo | Medium confidence |
 | 🔴 Red, large fuzzy halo | Low confidence — try another session from that side |
 | ⬜ Grey / listed only | Pixel not seen yet — might be behind trunk or dead |
 
+The pixel list (right panel / Model tab) is sorted worst-first so you always
+know which pixels still need attention.
+
 ---
 
 ## xLights import
 
+After exporting:
+
 1. Open xLights → **Layout** tab.
 2. Right-click in the model list → **Import Model** → select `BlinkyTree.xmodel`.
-3. The model uses a cylindrical-unwrap grid: rows = height, columns = angle.
+3. The model uses a cylindrical-unwrap grid: rows = height, columns = angle around
+   the tree, so Meteor Shower, Pinwheel, spirals etc. all work intuitively.
+
+The `BlinkyTree.csv` (`Channel, X, Y, Z`) can also be imported via
+**Custom Model Creator** if you want to rebuild the model manually.
 
 ---
 
 ## Supported controllers
 
 Any device that listens for E1.31/sACN on UDP port 5568:
-FPP, Falcon F16v3/F48/F4V3, Kulp K8/K16/K24/K32, HinksPix PRO, xLights E1.31 bridge.
+
+- FPP (Falcon Player) — auto-detected via REST API
+- Falcon F16v3, F48, F4V3
+- Kulp K8 / K16 / K24 / K32
+- HinksPix PRO
+- xLights E1.31 bridge output
+- Virtually any modern pixel controller with E1.31 input
 
 ---
 
 ## Camera tips
 
-- Darker room = better LED detection.
-- Increase **capture delay** if your camera is slow to adjust exposure (0.2–0.3 s).
+- Darker room = better LED detection (turn off overhead lights if possible).
+- Increase **capture delay** if your camera is slow to adjust exposure
+  (0.2–0.3 s is usually enough).
+- **IP cameras / phones (desktop app):** enter the RTSP URL
+  (`rtsp://user:pass@192.168.x.x/stream`).
+  Android: *IP Webcam* app. iPhone: *EpocCam* or *Camo*.
 - More sessions from more angles = higher confidence. Follow the suggestion!
 
 ---
 
-## Building from source
+## Building from source (for contributors)
 
 ```bash
 pip install pyinstaller
 pyinstaller BlinkyMap.spec --noconfirm
+# output is in dist/BlinkyMap/
 ```
 
-GitHub Actions builds Windows/Mac/Linux zips automatically on every push to `main`.
+GitHub Actions runs this automatically on every push to `main` and attaches
+the zips to every GitHub Release.

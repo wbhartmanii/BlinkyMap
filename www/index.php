@@ -7,7 +7,7 @@
  * then redirects the browser to the single-page app.
  */
 
-// ── paths ──────────────────────────────────────────────────────────────────────────────
+// ── paths ──────────────────────────────────────────────────────────────────────
 $plugin_dir    = dirname(__FILE__, 2);          // www/ → plugin root
 $plugin_name   = basename($plugin_dir);         // 'blinkymap' or 'BlinkyMap' — whatever FPP cloned
 $server_script = $plugin_dir . '/blinkymap_server.py';
@@ -15,7 +15,7 @@ $pid_file      = '/tmp/blinkymap_server.pid';
 $log_file      = '/tmp/blinkymap_server.log';
 $ws_port       = 8765;
 
-// ── start server if not already reachable ─────────────────────────────────────────────
+// ── start server if not already reachable ─────────────────────────────────────
 $sock = @fsockopen('127.0.0.1', $ws_port, $errno, $errstr, 0.3);
 if ($sock) {
     fclose($sock);
@@ -38,6 +38,6 @@ if ($sock) {
     }
 }
 
-// ── redirect to the SPA (use actual plugin folder name for the URL) ─────────────────
+// ── redirect to the SPA (use actual plugin folder name for the URL) ───────────
 header("Location: /plugin/{$plugin_name}/blinkymap/index.html");
 exit;

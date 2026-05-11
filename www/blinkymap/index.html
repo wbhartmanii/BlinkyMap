@@ -33,6 +33,9 @@
   <button class="tab-btn"        data-tab="export">Export</button>
 </nav>
 
+<!-- ══════════════════════════════════════════════════════════════════════════
+     SETUP TAB
+     ══════════════════════════════════════════════════════════════════════════ -->
 <section id="tab-setup" class="tab-panel active">
   <h2>Controller</h2>
   <label>FPP / Controller IP
@@ -53,7 +56,7 @@
   <button class="btn-primary wide" id="btn-save-config">Save &amp; Connect</button>
 
   <h2>Camera</h2>
-  <label>Horizontal FOV (°)
+  <label>Horizontal FOV (&deg;)
     <input id="cfg-fov" type="number" value="60" min="20" max="170" step="1" />
   </label>
   <button class="btn-secondary wide" id="btn-open-camera">Open Phone Camera</button>
@@ -61,9 +64,12 @@
   <canvas id="cam-canvas" style="display:none"></canvas>
 </section>
 
+<!-- ══════════════════════════════════════════════════════════════════════════
+     SCAN TAB
+     ══════════════════════════════════════════════════════════════════════════ -->
 <section id="tab-scan" class="tab-panel">
   <h2>Session Position</h2>
-  <label>Angle around tree (°)
+  <label>Angle around tree (&deg;)
     <input id="sess-angle" type="number" value="0" min="0" max="359" step="5" />
   </label>
   <label>Distance from trunk (m)
@@ -82,6 +88,7 @@
     <button class="btn-danger wide" id="btn-stop-scan">Stop Scan</button>
   </div>
 
+  <!-- Suggested next position — shown after each scan -->
   <div id="suggestion-card" style="display:none">
     <div class="suggestion-header">
       <span class="suggestion-icon">&#127919;</span>
@@ -103,6 +110,9 @@
   </div>
 </section>
 
+<!-- ══════════════════════════════════════════════════════════════════════════
+     MODEL TAB
+     ══════════════════════════════════════════════════════════════════════════ -->
 <section id="tab-model" class="tab-panel">
   <div id="viewer-container"></div>
   <div id="pixel-list-wrap">
@@ -113,6 +123,9 @@
   </div>
 </section>
 
+<!-- ══════════════════════════════════════════════════════════════════════════
+     EXPORT TAB
+     ══════════════════════════════════════════════════════════════════════════ -->
 <section id="tab-export" class="tab-panel">
   <h2>Export</h2>
   <p id="export-confidence-label">Run at least 2 sessions to export.</p>
@@ -121,8 +134,8 @@
 
   <h2>xLights Import</h2>
   <ol class="instructions">
-    <li>Open xLights → <strong>Layout</strong> tab.</li>
-    <li>Right-click model list → <strong>Import Model</strong>.</li>
+    <li>Open xLights &rarr; <strong>Layout</strong> tab.</li>
+    <li>Right-click model list &rarr; <strong>Import Model</strong>.</li>
     <li>Select <code>BlinkyTree.xmodel</code>.</li>
     <li>The model uses cylindrical-unwrap: rows = height, cols = angle.</li>
   </ol>
