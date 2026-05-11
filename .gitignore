@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# PyInstaller
+dist/
+*.spec.bak
+
+# Three.js vendor (downloaded by scripts/fpp_install.sh at install time)
+www/blinkymap/vendor/
+
+# OS
+.DS_Store
+Thumbs.db
