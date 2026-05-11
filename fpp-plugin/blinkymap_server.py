@@ -18,6 +18,8 @@ WebSocket message protocol (JSON):
     {"type": "scan_complete",    "session": int, "detected": int}
     {"type": "model",            "pixels": [...]}      # after triangulation
     {"type": "confidence",       "overall": float, "grade": str, "detail": {...}}
+    {"type": "next_suggestion",  "angle": float, "distance": float,
+                                  "score": float, "unseen_count": int, "reason": str}
     {"type": "export_ready",     "xmodel": str, "csv": str}   # file content inline
 
   Browser → Server
@@ -460,6 +462,130 @@ def export_xmodel(model: BlinkyModel, pixel_count: int) -> str:
     return ET.tostring(root, encoding="unicode", xml_declaration=False)
 
 
+# ── Next-session suggester ────────────────────────────────────────────────────
+
+def _angular_dist(a: float, b: float) -> float:
+    """Shortest angular distance in degrees, result in [0, 180]."""
+    diff = abs(a - b) % 360.0
+    return diff if diff <= 180.0 else 360.0 - diff
+
+
+def suggest_next_angle(model: BlinkyModel, sessions: Dict) -> dict:
+    """
+    Score every 5° candidate angle and recommend the best next camera position.
+
+    Three weighted sub-scores (height assumed constant):
+      gap_score      (0.30) — prefer angles far from every existing session
+      coverage_score (0.50) — prefer facing tree sectors with few detected pixels
+      spread_score   (0.20) — prefer angles that widen triangulation baseline
+                              for already-positioned low-confidence pixels
+
+    Returns a dict suitable for JSON broadcast.
+    """
+    existing = [(sc.angle_deg, sc.distance_m)
+                for _, (sc, _) in sessions.items()]
+    existing_angles   = [a for a, _ in existing]
+    existing_distances = [d for _, d in existing]
+    suggested_distance = float(np.median(existing_distances)) if existing_distances else 2.0
+
+    # ── Trivial cases ─────────────────────────────────────────────────────────
+    if not existing_angles:
+        return _suggestion(0.0, suggested_distance, 0.5, 0,
+                           "Start anywhere — first session")
+
+    if not model.results:
+        opp = (existing_angles[-1] + 180.0) % 360.0
+        return _suggestion(opp, suggested_distance, 0.6, 0,
+                           "Opposite side — needed for first triangulation")
+
+    # ── Build density map of positioned pixels by XZ angle ───────────────────
+    N_BINS   = 36
+    bin_size = 360.0 / N_BINS
+    bin_counts   = [0] * N_BINS   # how many pixels detected in each sector
+    bin_low_conf = [0] * N_BINS   # of those, how many have low confidence
+
+    positioned = [(pr.position, pr.confidence)
+                  for pr in model.results.values() if pr.position is not None]
+
+    # Estimate tree centre from median of positioned pixels
+    if positioned:
+        xs = [p[0] for p, _ in positioned]
+        zs = [p[2] for p, _ in positioned]
+        cx, cz = float(np.median(xs)), float(np.median(zs))
+    else:
+        cx, cz = 0.0, 0.0
+
+    for pos, conf in positioned:
+        phi = math.degrees(math.atan2(pos[0] - cx, pos[2] - cz)) % 360.0
+        b   = int(phi / bin_size) % N_BINS
+        bin_counts[b]   += 1
+        if conf < 0.60:
+            bin_low_conf[b] += 1
+
+    unseen_count = sum(1 for pr in model.results.values() if pr.position is None)
+    max_count    = max(bin_counts) if any(c > 0 for c in bin_counts) else 1
+
+    # ── Score each candidate angle ────────────────────────────────────────────
+    best_angle  = existing_angles[-1]   # fallback
+    best_score  = -1.0
+    best_parts  = {}
+
+    for theta in range(0, 360, 5):
+        theta_f = float(theta)
+
+        # 1. Gap from existing sessions
+        gap       = min(_angular_dist(theta_f, a) for a in existing_angles)
+        gap_score = gap / 180.0
+
+        # 2. Coverage: camera at theta sees tree sectors within ±90° of theta.
+        #    Weight each covered sector by how sparse it is (1 - fraction of max).
+        coverage_score = 0.0
+        for b in range(N_BINS):
+            sector_centre = b * bin_size + bin_size / 2.0
+            if _angular_dist(theta_f, sector_centre) <= 90.0:
+                sparsity = 1.0 - bin_counts[b] / max_count
+                coverage_score += sparsity
+        coverage_score /= N_BINS   # normalise to [0, 1]
+
+        # 3. Spread improvement for low-conf pixels:
+        #    Use the minimum angular gap theta adds to any existing session —
+        #    larger gap = more orthogonal baseline = better triangulation.
+        new_min_gap  = min(_angular_dist(theta_f, a) for a in existing_angles)
+        spread_score = new_min_gap / 180.0
+
+        total = 0.30 * gap_score + 0.50 * coverage_score + 0.20 * spread_score
+
+        if total > best_score:
+            best_score  = total
+            best_angle  = theta_f
+            best_parts  = {"gap": gap_score, "coverage": coverage_score, "spread": spread_score}
+
+    # ── Build human-readable reason ───────────────────────────────────────────
+    dominant = max(best_parts, key=best_parts.get)
+    if dominant == "coverage" and unseen_count > 0:
+        reason = (f"{unseen_count} pixels not yet seen — "
+                  f"this angle faces their likely hiding spot")
+    elif dominant == "coverage":
+        reason = "Faces the least-scanned side of the tree"
+    elif dominant == "gap":
+        reason = "Largest unexplored viewing angle around the tree"
+    else:
+        reason = "Adds the widest new baseline for low-confidence pixels"
+
+    return _suggestion(best_angle, suggested_distance, best_score, unseen_count, reason)
+
+
+def _suggestion(angle: float, distance: float, score: float,
+                unseen: int, reason: str) -> dict:
+    return {
+        "angle":        round(angle, 1),
+        "distance":     round(distance, 2),
+        "score":        round(score, 3),
+        "unseen_count": unseen,
+        "reason":       reason,
+    }
+
+
 # ── Session ID counter ────────────────────────────────────────────────────────
 
 _next_session_id = 1
@@ -653,6 +779,13 @@ class BlinkyServer:
             await self.broadcast({
                 "type": "confidence",
                 **self.model.model_confidence(),
+            })
+
+            # Suggest best next camera position
+            suggestion = suggest_next_angle(self.model, self.model.sessions)
+            await self.broadcast({
+                "type": "next_suggestion",
+                **suggestion,
             })
 
         except asyncio.CancelledError:

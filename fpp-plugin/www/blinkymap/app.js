@@ -37,6 +37,11 @@ const scanBlock      = document.getElementById("scan-progress-block");
 const progressBar    = document.getElementById("scan-progress-bar");
 const progressLabel  = document.getElementById("scan-progress-label");
 const btnStopScan    = document.getElementById("btn-stop-scan");
+const suggCard       = document.getElementById("suggestion-card");
+const suggAngle      = document.getElementById("sugg-angle");
+const suggDist       = document.getElementById("sugg-dist");
+const suggReason     = document.getElementById("sugg-reason");
+const btnUseSugg     = document.getElementById("btn-use-suggestion");
 const sessionList    = document.getElementById("session-list");
 const confidencePct  = document.getElementById("confidence-pct");
 const confidenceGrade= document.getElementById("confidence-grade");
@@ -57,8 +62,9 @@ let camWidth     = 1280;
 let camHeight    = 720;
 let scanning     = false;
 let currentPixelIdx = -1;   // pixel the server is currently firing
-let sessions     = [];       // [{id, angle, detected, total}]
-let latestPixels = [];       // last model from server
+let sessions        = [];    // [{id, angle, detected, total}]
+let latestPixels    = [];    // last model from server
+let lastSuggestion  = null;  // last next_suggestion payload
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
 tabBtns.forEach(btn => {
@@ -71,6 +77,7 @@ tabBtns.forEach(btn => {
     if (btn.dataset.tab === "model" && !viewer) {
       viewer = new Viewer3D(viewerContainer);
       if (latestPixels.length) viewer.update(latestPixels);
+      if (lastSuggestion) viewer.setSuggestion(lastSuggestion.angle, lastSuggestion.distance);
     }
   });
 });
@@ -175,6 +182,12 @@ async function handleServerMessage(msg) {
       updateConfidence(msg);
       break;
 
+    case "next_suggestion":
+      lastSuggestion = msg;
+      showSuggestion(msg);
+      if (viewer) viewer.setSuggestion(msg.angle, msg.distance);
+      break;
+
     case "export_ready":
       if (msg.xmodel) triggerDownload("BlinkyTree.xmodel", msg.xmodel, "text/xml");
       if (msg.csv)    triggerDownload("BlinkyTree.csv",    msg.csv,    "text/csv");
@@ -267,6 +280,22 @@ function addSessionCard(sessionId, detected, total) {
   `;
   sessionList.appendChild(card);
 }
+
+function showSuggestion(msg) {
+  const angle = msg.angle ?? 0;
+  suggAngle.textContent  = `${angle}°`;
+  suggDist.textContent   = `${msg.distance ?? 2}m from trunk · same height`;
+  suggReason.textContent = msg.reason ?? "";
+  suggCard.style.display = "block";
+}
+
+btnUseSugg.addEventListener("click", () => {
+  if (!lastSuggestion) return;
+  sessAngle.value = lastSuggestion.angle;
+  sessDist.value  = lastSuggestion.distance;
+  // Scroll to top of Scan tab so user sees the form
+  document.getElementById("tab-scan").scrollTo({ top: 0, behavior: "smooth" });
+});
 
 function updateConfidence(msg) {
   const pct = Math.round((msg.overall ?? 0) * 100);

@@ -88,6 +88,18 @@
     <button class="btn-danger wide" id="btn-stop-scan">Stop Scan</button>
   </div>
 
+  <!-- Suggested next position — shown after each scan -->
+  <div id="suggestion-card" style="display:none">
+    <div class="suggestion-header">
+      <span class="suggestion-icon">&#127919;</span>
+      <span>Move camera here next</span>
+    </div>
+    <div class="suggestion-angle" id="sugg-angle">–</div>
+    <div class="suggestion-dist"  id="sugg-dist"></div>
+    <div class="suggestion-reason" id="sugg-reason"></div>
+    <button class="btn-primary wide" id="btn-use-suggestion">Use This Angle</button>
+  </div>
+
   <h2>Sessions</h2>
   <div id="session-list"></div>
 

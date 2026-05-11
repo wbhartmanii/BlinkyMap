@@ -48,6 +48,8 @@ export class Viewer3D {
     // Placeholder points
     this._dotCloud   = null;
     this._haloCloud  = null;
+    this._suggGroup  = null;
+    this._suggRing   = null;
 
     this._resize();
     this._raf = requestAnimationFrame(this._loop.bind(this));
@@ -61,12 +63,6 @@ export class Viewer3D {
     this._cam.aspect = w / h;
     this._cam.updateProjectionMatrix();
     this._renderer.setSize(w, h, false);
-  }
-
-  _loop() {
-    this._controls.update();
-    this._renderer.render(this._scene, this._cam);
-    this._raf = requestAnimationFrame(this._loop.bind(this));
   }
 
   /**
@@ -168,6 +164,76 @@ export class Viewer3D {
       this._haloCloud = new THREE.Points(geo, mat);
       this._scene.add(this._haloCloud);
     }
+  }
+
+  /**
+   * Show a suggested camera position as a glowing marker + aim line.
+   * angle_deg: horizontal angle around tree (same convention as sessions)
+   * distance:  metres from trunk centre
+   */
+  setSuggestion(angle_deg, distance = 2.0) {
+    // Remove previous suggestion objects
+    if (this._suggGroup) {
+      this._scene.remove(this._suggGroup);
+      this._suggGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); });
+    }
+
+    const rad  = (angle_deg * Math.PI) / 180;
+    const x    = distance * Math.sin(rad);
+    const z    = distance * Math.cos(rad);
+    const y    = this._controls.target.y;   // match orbit target height
+
+    const group = new THREE.Group();
+
+    // Pulsing sphere at the suggested position
+    const sphere = new THREE.Mesh(
+      new THREE.SphereGeometry(0.08, 16, 16),
+      new THREE.MeshBasicMaterial({ color: 0x4fc3f7, transparent: true, opacity: 0.9 })
+    );
+    sphere.position.set(x, y, z);
+    group.add(sphere);
+
+    // Outer ring (halo)
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(0.12, 0.16, 32),
+      new THREE.MeshBasicMaterial({
+        color: 0x4fc3f7, transparent: true, opacity: 0.45, side: THREE.DoubleSide
+      })
+    );
+    ring.position.set(x, y, z);
+    ring.lookAt(this._cam.position);   // always face the camera (updated in loop)
+    group.add(ring);
+    this._suggRing = ring;
+
+    // Dashed aim line from suggested position to tree centre
+    const linePts = [new THREE.Vector3(x, y, z), new THREE.Vector3(0, y, 0)];
+    const lineGeo = new THREE.BufferGeometry().setFromPoints(linePts);
+    const line    = new THREE.Line(
+      lineGeo,
+      new THREE.LineDashedMaterial({ color: 0x4fc3f7, opacity: 0.4,
+                                     transparent: true, dashSize: 0.08, gapSize: 0.05 })
+    );
+    line.computeLineDistances();
+    group.add(line);
+
+    // Label arrow pointing down to sphere
+    const arrowGeo = new THREE.ConeGeometry(0.04, 0.14, 8);
+    const arrow    = new THREE.Mesh(arrowGeo,
+      new THREE.MeshBasicMaterial({ color: 0x4fc3f7 }));
+    arrow.position.set(x, y + 0.25, z);
+    arrow.rotation.z = Math.PI;   // point downward
+    group.add(arrow);
+
+    this._scene.add(group);
+    this._suggGroup = group;
+  }
+
+  _loop() {
+    this._controls.update();
+    // Keep suggestion ring facing the camera
+    if (this._suggRing) this._suggRing.lookAt(this._cam.position);
+    this._renderer.render(this._scene, this._cam);
+    this._raf = requestAnimationFrame(this._loop.bind(this));
   }
 
   destroy() {
