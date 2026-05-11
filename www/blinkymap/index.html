@@ -33,9 +33,6 @@
   <button class="tab-btn"        data-tab="export">Export</button>
 </nav>
 
-<!-- ══════════════════════════════════════════════════════════════════════════
-     SETUP TAB
-     ══════════════════════════════════════════════════════════════════════════ -->
 <section id="tab-setup" class="tab-panel active">
   <h2>Controller</h2>
   <label>FPP / Controller IP
@@ -64,9 +61,6 @@
   <canvas id="cam-canvas" style="display:none"></canvas>
 </section>
 
-<!-- ══════════════════════════════════════════════════════════════════════════
-     SCAN TAB
-     ══════════════════════════════════════════════════════════════════════════ -->
 <section id="tab-scan" class="tab-panel">
   <h2>Session Position</h2>
   <label>Angle around tree (°)
@@ -88,7 +82,6 @@
     <button class="btn-danger wide" id="btn-stop-scan">Stop Scan</button>
   </div>
 
-  <!-- Suggested next position — shown after each scan -->
   <div id="suggestion-card" style="display:none">
     <div class="suggestion-header">
       <span class="suggestion-icon">&#127919;</span>
@@ -110,9 +103,6 @@
   </div>
 </section>
 
-<!-- ══════════════════════════════════════════════════════════════════════════
-     MODEL TAB
-     ══════════════════════════════════════════════════════════════════════════ -->
 <section id="tab-model" class="tab-panel">
   <div id="viewer-container"></div>
   <div id="pixel-list-wrap">
@@ -123,9 +113,6 @@
   </div>
 </section>
 
-<!-- ══════════════════════════════════════════════════════════════════════════
-     EXPORT TAB
-     ══════════════════════════════════════════════════════════════════════════ -->
 <section id="tab-export" class="tab-panel">
   <h2>Export</h2>
   <p id="export-confidence-label">Run at least 2 sessions to export.</p>
