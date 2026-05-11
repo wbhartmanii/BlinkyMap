@@ -29,14 +29,7 @@ try:
 except ImportError:
     _PIL_OK = False
 
-try:
-    import matplotlib
-    matplotlib.use("TkAgg")
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-    from matplotlib.figure import Figure
-    _MPL_OK = True
-except ImportError:
-    _MPL_OK = False
+from .viewer3d import make_viewer as _make_viewer
 
 from .capture import (Camera, CameraManager, LEDDetector, PixelCapture,
                        capture_backgrounds, scan_pixel)
@@ -499,13 +492,17 @@ class SessionsTab(ttk.Frame):
         left_lf = ttk.LabelFrame(split, text="Live 3D View  (updates each session)",
                                   padding=4)
         split.add(left_lf, weight=3)
-        if _MPL_OK:
-            self.fig = Figure(figsize=(3.8, 3.2), dpi=88)
-            self.ax  = self.fig.add_subplot(111, projection="3d")
-            self.canvas = FigureCanvasTkAgg(self.fig, master=left_lf)
-            self.canvas.get_tk_widget().pack(fill="both", expand=True)
-        else:
-            ttk.Label(left_lf, text="Install matplotlib for 3D preview").pack()
+
+        self._viewer = _make_viewer(left_lf)
+        self._viewer.widget.pack(fill="both", expand=True)
+
+        viewer_ctrl = ttk.Frame(left_lf)
+        viewer_ctrl.pack(fill="x", pady=(2, 0))
+        ttk.Button(viewer_ctrl, text="Reset View",
+                   command=self._viewer.reset_view).pack(side="left", padx=4)
+        ttk.Label(viewer_ctrl,
+                  text=f"engine: {self._viewer.backend}",
+                  foreground="gray", font=("", 8)).pack(side="left", padx=6)
 
         right_lf = ttk.LabelFrame(split, text="Pixel Status", padding=4)
         split.add(right_lf, weight=2)
@@ -791,49 +788,9 @@ class SessionsTab(ttk.Frame):
                                    values=(ch, label, conf, seen, err),
                                    tags=(label,))
 
-    def _update_3d(self, results: Dict[int, PixelResult], mc: ModelConfidence):
-        if not _MPL_OK:
-            return
-
-        self.ax.clear()
-
-        # Group triangulated pixels by confidence label
-        groups: Dict[str, list] = {"high": [], "medium": [], "low": []}
-        for r in results.values():
-            if r.position is not None:
-                groups.setdefault(r.confidence_label, []).append(r)
-
-        for label, color in CONF_COLORS.items():
-            if label == "unseen":
-                continue
-            grp = groups.get(label, [])
-            if not grp:
-                continue
-            pts   = np.array([r.position   for r in grp])
-            confs = np.array([r.confidence for r in grp])
-
-            # Layer 1 — uncertainty halos: size ∝ (1 − confidence)
-            # High-conf points get a tiny halo; low-conf get a big fuzzy one.
-            halo_s = (1.0 - confs) ** 1.2 * 500 + 15
-            self.ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
-                            c=color, s=halo_s, alpha=0.13,
-                            linewidths=0, depthshade=False)
-
-            # Layer 2 — center dots: fixed size, opaque
-            self.ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
-                            c=color, s=14, alpha=0.92,
-                            linewidths=0.5, edgecolors="white",
-                            label=label, depthshade=True)
-
-        self.ax.set_xlabel("X", fontsize=7)
-        self.ax.set_ylabel("Y", fontsize=7)
-        self.ax.set_zlabel("Z", fontsize=7)
-        self.ax.tick_params(labelsize=6)
-        n_sess = len([s for s in self.app.sessions if s.calib])
-        self.ax.set_title(f"{mc.score_pct}% confidence  |  {n_sess} session(s)",
-                          fontsize=9)
-        self.ax.legend(fontsize=7, loc="upper left")
-        self.canvas.draw()
+    def _update_3d(self, results: Dict[int, PixelResult],
+                   mc: ModelConfidence) -> None:
+        self._viewer.update(results)
 
 
 # ── Tab 4: Export ─────────────────────────────────────────────────────────────
@@ -845,16 +802,19 @@ class ExportTab(ttk.Frame):
 
         # ── final 3D view ─────────────────────────────────────────────────────
         view_sec = _section(self, "Final 3D Model")
-        if _MPL_OK:
-            self.fig = Figure(figsize=(5, 4), dpi=90)
-            self.ax = self.fig.add_subplot(111, projection="3d")
-            self.canvas = FigureCanvasTkAgg(self.fig, master=view_sec)
-            self.canvas.get_tk_widget().pack(fill="both", expand=True)
-        else:
-            ttk.Label(view_sec, text="Install matplotlib for preview").pack()
 
-        ttk.Button(view_sec, text="Refresh View",
-                   command=self._refresh).pack(pady=4)
+        self._viewer = _make_viewer(view_sec)
+        self._viewer.widget.pack(fill="both", expand=True)
+
+        view_ctrl = ttk.Frame(view_sec)
+        view_ctrl.pack(fill="x", pady=(2, 0))
+        ttk.Button(view_ctrl, text="Refresh View",
+                   command=self._refresh).pack(side="left", padx=4)
+        ttk.Button(view_ctrl, text="Reset View",
+                   command=self._viewer.reset_view).pack(side="left", padx=4)
+        ttk.Label(view_ctrl,
+                  text=f"engine: {self._viewer.backend}",
+                  foreground="gray", font=("", 8)).pack(side="left", padx=6)
 
         # ── confidence summary ────────────────────────────────────────────────
         sum_sec = _section(self, "Summary")
@@ -902,42 +862,9 @@ class ExportTab(ttk.Frame):
             f"Sessions used: {len([s for s in self.app.sessions if s.calib is not None])}"
         )
 
-    def _draw(self, results: Dict[int, PixelResult], mc: ModelConfidence):
-        if not _MPL_OK:
-            return
-        self.ax.clear()
-
-        groups: Dict[str, list] = {"high": [], "medium": [], "low": []}
-        for r in results.values():
-            if r.position is not None:
-                groups.setdefault(r.confidence_label, []).append(r)
-
-        for label, color in CONF_COLORS.items():
-            if label == "unseen":
-                continue
-            grp = groups.get(label, [])
-            if not grp:
-                continue
-            pts   = np.array([r.position   for r in grp])
-            confs = np.array([r.confidence for r in grp])
-
-            # Halos — sized by uncertainty
-            halo_s = (1.0 - confs) ** 1.2 * 650 + 20
-            self.ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
-                            c=color, s=halo_s, alpha=0.14,
-                            linewidths=0, depthshade=False)
-            # Center dots
-            self.ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
-                            c=color, s=20, alpha=0.92,
-                            linewidths=0.5, edgecolors="white",
-                            label=label, depthshade=True)
-
-        self.ax.set_xlabel("X")
-        self.ax.set_ylabel("Y (height)")
-        self.ax.set_zlabel("Z")
-        self.ax.set_title(f"BlinkyMap — {mc.score_pct}% confident")
-        self.ax.legend(fontsize=8)
-        self.canvas.draw()
+    def _draw(self, results: Dict[int, PixelResult],
+              mc: ModelConfidence) -> None:
+        self._viewer.update(results)
 
     def _export(self):
         results = self.app.pixel_results
