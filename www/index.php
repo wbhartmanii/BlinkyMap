@@ -7,7 +7,7 @@
  * the browser to the single-page app.
  */
 
-$plugin_dir = dirname(__FILE__, 2);          // fpp-plugin/
+$plugin_dir = dirname(__FILE__, 2);          // www/ → plugin root
 $server_script = $plugin_dir . '/blinkymap_server.py';
 $pid_file = '/tmp/blinkymap_server.pid';
 $ws_port = 8765;

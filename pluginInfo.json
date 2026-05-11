@@ -1,0 +1,23 @@
+{
+  "repoName": "blinkymap",
+  "name": "BlinkyMap",
+  "author": "BlinkyMap Contributors",
+  "description": "Automatically build a 3D xLights model for a pixel-wrapped tree by triangulating pixel positions from a phone camera moved to multiple spots.",
+  "homeURL": "https://github.com/wbhartmanii/blinkymap",
+  "srcURL": "https://github.com/wbhartmanii/blinkymap.git",
+  "bugURL": "https://github.com/wbhartmanii/blinkymap/issues",
+  "allowUpdates": 1,
+  "versions": [
+    {
+      "minFPPVersion": "6.0",
+      "maxFPPVersion": "0",
+      "branch": "main",
+      "sha": "",
+      "dependencies": {
+        "plugins": [],
+        "packages": [],
+        "scripts": []
+      }
+    }
+  ]
+}

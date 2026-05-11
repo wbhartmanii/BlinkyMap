@@ -4,7 +4,7 @@
 
 set -e
 
-PLUGIN_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"   # scripts/ → plugin root
 WWW_DIR="$PLUGIN_DIR/www/blinkymap"
 
 echo "BlinkyMap: installing Python dependencies..."
