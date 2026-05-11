@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "blinkymap"
+version = "0.1.0"
+description = "Pixel-tree 3D mapper — automatically build an xLights model from camera footage"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+keywords = ["xLights", "FPP", "pixels", "holiday", "lights", "3D"]
+dependencies = [
+    "opencv-python>=4.5.0",
+    "numpy>=1.21.0",
+    "requests>=2.26.0",
+    "Pillow>=9.0.0",
+    "matplotlib>=3.4.0",   # 3D viewer fallback (always install)
+]
+
+[project.optional-dependencies]
+gpu = [
+    "vispy>=0.14.0",       # GPU-accelerated 3D viewer (recommended)
+]
+dev = [
+    "pyinstaller>=6.0",
+]
+
+[project.scripts]
+blinkymap = "blinkymap.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/wbhartmanii/blinkymap"
+Issues   = "https://github.com/wbhartmanii/blinkymap/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["blinkymap*"]

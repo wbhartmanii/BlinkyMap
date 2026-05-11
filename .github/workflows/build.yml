@@ -1,0 +1,91 @@
+name: Build executables
+
+# Runs on every push to main AND whenever you publish a GitHub Release.
+# On release: zips are attached to the release automatically.
+# On plain push: zips are stored as workflow artifacts (download from Actions tab).
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: BlinkyMap-Windows.zip
+            zip_cmd: Compress-Archive -Path dist/BlinkyMap -DestinationPath BlinkyMap-Windows.zip
+            shell: pwsh
+
+          - os: macos-latest
+            artifact: BlinkyMap-Mac.zip
+            zip_cmd: cd dist && zip -r ../BlinkyMap-Mac.zip BlinkyMap.app
+            shell: bash
+
+          - os: ubuntu-latest
+            artifact: BlinkyMap-Linux.zip
+            zip_cmd: cd dist && zip -r ../BlinkyMap-Linux.zip BlinkyMap
+            shell: bash
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # ── system deps ──────────────────────────────────────────────────────────
+      - name: System deps (Linux — headless GL + tkinter)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            python3-tk \
+            libgl1-mesa-glx libgl1-mesa-dev \
+            libglib2.0-0 libsm6 libxrender1 libxext6 \
+            libxcb-xinerama0
+
+      - name: System deps (macOS — tkinter already bundled with Python)
+        if: matrix.os == 'macos-latest'
+        run: echo "No extra system deps needed"
+
+      # ── Python deps ───────────────────────────────────────────────────────────
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            opencv-python numpy requests Pillow matplotlib \
+            vispy pyinstaller
+
+      # ── build ─────────────────────────────────────────────────────────────────
+      - name: Build with PyInstaller
+        run: pyinstaller BlinkyMap.spec --noconfirm
+
+      # ── zip ───────────────────────────────────────────────────────────────────
+      - name: Create zip
+        run: ${{ matrix.zip_cmd }}
+        shell: ${{ matrix.shell }}
+
+      # ── upload artifact (always) ──────────────────────────────────────────────
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          retention-days: 30
+
+      # ── attach to GitHub Release (only on release event) ──────────────────────
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
