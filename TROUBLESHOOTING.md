@@ -152,6 +152,19 @@ Check the output for the specific error. Common causes:
 
 ---
 
+## Known open issues
+
+These are tracked and being worked on — check the issue for the latest status:
+
+| Issue | Link |
+|-------|------|
+| End-to-end scan not yet validated with real hardware | [#3](https://github.com/wbhartmanii/BlinkyMap/issues/3) |
+| Fresh RPi OS install not yet validated | [#4](https://github.com/wbhartmanii/BlinkyMap/issues/4) |
+| FPP 6.x / 7.x compatibility untested | [#5](https://github.com/wbhartmanii/BlinkyMap/issues/5) |
+| Self-signed cert causes browser warning | [#6](https://github.com/wbhartmanii/BlinkyMap/issues/6) |
+
+---
+
 ## Still stuck?
 
 Open an issue at https://github.com/wbhartmanii/BlinkyMap/issues and include:
