@@ -1,6 +1,7 @@
 #!/bin/bash
 # Configures Apache for BlinkyMap: alias, WebSocket proxy, and HTTPS.
 # Supports Raspberry Pi OS (Bullseye/Bookworm) and Debian 11/12 x86.
+# FPP compatibility: 6.x+ (8.0+ recommended for plugin manager).
 #
 # Run once manually if the plugin was installed before this script existed:
 #   curl -fsSL https://raw.githubusercontent.com/wbhartmanii/BlinkyMap/main/scripts/fix_apache.sh | sudo bash
@@ -12,9 +13,16 @@ echo "BlinkyMap fix_apache: running on ${PRETTY_NAME:-unknown OS}"
 
 CONF="/etc/apache2/conf-available/blinkymap.conf"
 
-# Detect the PHP-FPM socket (handles php7.4, php8.1, php8.2, php8.3, etc.)
-PHP_SOCK=$(ls /run/php/php*-fpm.sock 2>/dev/null | head -1)
-[ -z "$PHP_SOCK" ] && PHP_SOCK="/run/php/php8.2-fpm.sock"
+# ── Detect FPP DocumentRoot from running Apache config ────────────────────────
+FPP_DOCROOT=$(grep -rh "^[[:space:]]*DocumentRoot" /etc/apache2/sites-enabled/ 2>/dev/null \
+    | grep -v "#" | awk '{print $2}' | head -1)
+[ -z "$FPP_DOCROOT" ] && FPP_DOCROOT="/opt/fpp/www"
+echo "  Detected FPP DocumentRoot: ${FPP_DOCROOT}"
+
+# ── Detect PHP-FPM socket (newest version wins) ───────────────────────────────
+PHP_SOCK=$(ls /run/php/php*-fpm.sock 2>/dev/null | sort -rV | head -1)
+[ -z "$PHP_SOCK" ] && PHP_SOCK="/run/php/php7.4-fpm.sock"
+echo "  PHP-FPM socket: ${PHP_SOCK}"
 
 # ── Apache alias + WebSocket proxy ────────────────────────────────────────────
 a2enmod proxy proxy_http proxy_wstunnel >/dev/null 2>&1 || true
@@ -70,7 +78,7 @@ if command -v openssl &>/dev/null && ! ls /etc/apache2/sites-enabled/ 2>/dev/nul
     cat > /etc/apache2/sites-available/blinkymap-ssl.conf <<SSLCONF
 <IfModule mod_ssl.c>
     <VirtualHost _default_:443>
-        DocumentRoot /opt/fpp/www
+        DocumentRoot ${FPP_DOCROOT}
         SSLEngine on
         SSLCertificateFile    ${SSL_DIR}/server.crt
         SSLCertificateKeyFile ${SSL_DIR}/server.key
@@ -84,9 +92,13 @@ else
     echo "SSL already configured or openssl not found — skipping HTTPS."
 fi
 
-# ── Reload Apache ──────────────────────────────────────────────────────────────
+# ── Reload Apache (systemd or SysVinit) ───────────────────────────────────────
 apache2ctl configtest
-systemctl reload apache2
+if command -v systemctl &>/dev/null && systemctl is-system-running &>/dev/null; then
+    systemctl reload apache2
+else
+    service apache2 reload 2>/dev/null || apache2ctl graceful
+fi
 
 MY_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "your-pi-ip")
 echo ""

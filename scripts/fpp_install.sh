@@ -2,6 +2,7 @@
 # BlinkyMap FPP Plugin installer
 # Called by FPP Plugin Manager after extracting the plugin zip.
 # Supports: Raspberry Pi OS (Bullseye/Bookworm) and Debian 11/12 x86.
+# FPP compatibility: 6.x+ (8.0+ recommended for plugin manager).
 
 set -e
 
@@ -11,6 +12,12 @@ WWW_DIR="$PLUGIN_DIR/www/blinkymap"
 # ── OS detection (informational) ───────────────────────────────────────────────
 . /etc/os-release 2>/dev/null || true
 echo "BlinkyMap: installing on ${PRETTY_NAME:-unknown OS}"
+
+# ── Detect FPP DocumentRoot from running Apache config ────────────────────────
+FPP_DOCROOT=$(grep -rh "^[[:space:]]*DocumentRoot" /etc/apache2/sites-enabled/ 2>/dev/null \
+    | grep -v "#" | awk '{print $2}' | head -1)
+[ -z "$FPP_DOCROOT" ] && FPP_DOCROOT="/opt/fpp/www"
+echo "BlinkyMap: detected FPP DocumentRoot: ${FPP_DOCROOT}"
 
 # ── System dependencies ────────────────────────────────────────────────────────
 echo "BlinkyMap: installing system dependencies..."
@@ -60,8 +67,9 @@ if [ -d /etc/apache2/conf-available ]; then
     PLUGIN_NAME="$(basename "$PLUGIN_DIR")"
     CONF="/etc/apache2/conf-available/blinkymap.conf"
 
-    PHP_SOCK=$(ls /run/php/php*-fpm.sock 2>/dev/null | head -1)
-    [ -z "$PHP_SOCK" ] && PHP_SOCK="/run/php/php8.2-fpm.sock"
+    # Prefer newer PHP socket; fall back through known versions
+    PHP_SOCK=$(ls /run/php/php*-fpm.sock 2>/dev/null | sort -rV | head -1)
+    [ -z "$PHP_SOCK" ] && PHP_SOCK="/run/php/php7.4-fpm.sock"
 
     a2enmod proxy proxy_http proxy_wstunnel >/dev/null 2>&1 || true
 
@@ -126,7 +134,7 @@ if [ -d /etc/apache2/sites-available ] && command -v openssl &>/dev/null; then
         cat > /etc/apache2/sites-available/blinkymap-ssl.conf <<SSLCONF
 <IfModule mod_ssl.c>
     <VirtualHost _default_:443>
-        DocumentRoot /opt/fpp/www
+        DocumentRoot ${FPP_DOCROOT}
         SSLEngine on
         SSLCertificateFile    ${SSL_DIR}/server.crt
         SSLCertificateKeyFile ${SSL_DIR}/server.key
@@ -141,11 +149,18 @@ else
     echo "  WARNING: openssl not found — camera will need the Chrome insecure-origin flag."
 fi
 
-# ── Reload Apache once after all config changes ────────────────────────────────
+# ── Reload Apache (systemd or SysVinit) ───────────────────────────────────────
 if [ -d /etc/apache2 ]; then
-    apache2ctl configtest >/dev/null 2>&1 \
-        && systemctl reload apache2 && echo "BlinkyMap: Apache reloaded." \
-        || echo "WARNING: Apache config test failed — check /etc/apache2/conf-available/blinkymap.conf"
+    if apache2ctl configtest >/dev/null 2>&1; then
+        if command -v systemctl &>/dev/null && systemctl is-system-running &>/dev/null; then
+            systemctl reload apache2
+        else
+            service apache2 reload 2>/dev/null || apache2ctl graceful
+        fi
+        echo "BlinkyMap: Apache reloaded."
+    else
+        echo "WARNING: Apache config test failed — check /etc/apache2/conf-available/blinkymap.conf"
+    fi
 fi
 
 MY_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "your-pi-ip")
