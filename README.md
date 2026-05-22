@@ -7,20 +7,34 @@ by triangulating pixel positions from a single camera moved to multiple spots.
 
 ## Install & Run
 
-### Option 1 — FPP Plugin (no extra hardware needed) ⭐ recommended
+### Option 1 — FPP Plugin (recommended) ⭐
 
-If you already run **Falcon Player (FPP)** on a Raspberry Pi, this is the easiest
-path — your phone browser is the camera, no laptop required.
+If you already run **Falcon Player (FPP)** on a Raspberry Pi or x86 Debian box,
+this is the easiest path — your phone browser is the camera, no laptop required.
+
+**Compatibility:** FPP 6.0+ · Raspberry Pi OS Bullseye/Bookworm · Debian 11/12
 
 1. In the FPP web UI go to **Content Setup → Plugin Manager**
 2. Enter the plugin URL:
    ```
-   https://github.com/wbhartmanii/blinkymap
+   https://github.com/wbhartmanii/BlinkyMap
    ```
-3. Click **Install** — FPP runs `install.sh` which pulls the Python deps and
-   vendors Three.js locally (needs internet once)
+3. Click **Install** — the install script automatically:
+   - Installs Python deps (`numpy`, `websockets`, `requests`) via apt
+   - Downloads and vendors Three.js locally (needs internet once)
+   - Configures Apache with the correct alias and WebSocket proxy
+   - Generates a self-signed HTTPS certificate for camera access
 4. The **BlinkyMap** menu item appears in FPP's navigation
-5. Open `http://<pi-ip>/plugin/blinkymap/` on your **phone** — that's the whole UI
+
+**After install — use HTTPS for camera access:**
+
+```
+https://<pi-ip>/plugin/blinkymap/
+```
+
+Your browser will warn about the self-signed certificate — click
+**Advanced → Proceed** once. After that, the camera works in any browser
+without any flags or settings changes.
 
 > The plugin fires pixels via E1.31 to localhost (zero extra wiring), and your
 > phone's browser handles the camera and 3D viewer via WebRTC + Three.js.
@@ -29,7 +43,7 @@ path — your phone browser is the camera, no laptop required.
 
 ### Option 2 — Download & double-click (standalone desktop app)
 
-1. Go to the [**Releases**](https://github.com/wbhartmanii/blinkymap/releases) page
+1. Go to the [**Releases**](https://github.com/wbhartmanii/BlinkyMap/releases) page
 2. Download the zip for your OS:
    - `BlinkyMap-Windows.zip`
    - `BlinkyMap-Mac.zip`
@@ -44,7 +58,7 @@ path — your phone browser is the camera, no laptop required.
 ### Option 3 — One-liner with pipx
 
 ```bash
-pipx install git+https://github.com/wbhartmanii/blinkymap
+pipx install git+https://github.com/wbhartmanii/BlinkyMap
 blinkymap
 ```
 
@@ -56,7 +70,7 @@ Install it once with `pip install pipx` (or `brew install pipx` on Mac).
 ### Option 4 — Plain pip
 
 ```bash
-pip install git+https://github.com/wbhartmanii/blinkymap
+pip install git+https://github.com/wbhartmanii/BlinkyMap
 blinkymap
 # or: python -m blinkymap
 ```
@@ -66,8 +80,8 @@ blinkymap
 ### Option 5 — Run from source
 
 ```bash
-git clone https://github.com/wbhartmanii/blinkymap
-cd blinkymap
+git clone https://github.com/wbhartmanii/BlinkyMap
+cd BlinkyMap
 pip install -r requirements.txt
 python main.py
 ```
@@ -174,6 +188,13 @@ Any device that listens for E1.31/sACN on UDP port 5568:
   (`rtsp://user:pass@192.168.x.x/stream`).
   Android: *IP Webcam* app. iPhone: *EpocCam* or *Camo*.
 - More sessions from more angles = higher confidence. Follow the suggestion!
+
+---
+
+## Troubleshooting
+
+See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for solutions to common issues
+including camera errors, WebSocket connection problems, and plugin 404s.
 
 ---
 
