@@ -1,14 +1,21 @@
 #!/bin/bash
 # BlinkyMap FPP Plugin installer
-# Called by FPP Plugin Manager after extracting the plugin zip.
+# Called by FPP Plugin Manager after cloning the repo.
 
 set -e
 
-PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"   # scripts/ → plugin root
+PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"   # scripts/ -> plugin root
 WWW_DIR="$PLUGIN_DIR/www/blinkymap"
 
 echo "BlinkyMap: installing Python dependencies..."
-pip3 install --quiet --upgrade numpy websockets requests 2>&1 | tail -5
+# Use python3 -m pip (pip3 may not be in PATH on all FPP installs)
+if command -v pip3 &>/dev/null; then
+    pip3 install --quiet --upgrade numpy websockets requests 2>&1 | tail -5
+elif command -v python3 &>/dev/null; then
+    python3 -m pip install --quiet --upgrade numpy websockets requests 2>&1 | tail -5
+else
+    echo "WARNING: pip3/python3 not found, skipping Python deps"
+fi
 
 echo "BlinkyMap: downloading Three.js..."
 mkdir -p "$WWW_DIR/vendor"
