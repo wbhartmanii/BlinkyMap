@@ -78,8 +78,8 @@ if [ -d /etc/apache2/conf-available ]; then
 ProxyPass /blinkymap-ws ws://127.0.0.1:8765
 ProxyPassReverse /blinkymap-ws ws://127.0.0.1:8765
 
-Alias /plugin/${PLUGIN_NAME} /home/fpp/media/plugins/${PLUGIN_NAME}/www
-<Directory /home/fpp/media/plugins/${PLUGIN_NAME}/www>
+Alias /plugin/${PLUGIN_NAME} ${PLUGIN_DIR}/www
+<Directory ${PLUGIN_DIR}/www>
     Options FollowSymLinks
     AllowOverride None
     Require all granted

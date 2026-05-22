@@ -13,6 +13,25 @@ echo "BlinkyMap fix_apache: running on ${PRETTY_NAME:-unknown OS}"
 
 CONF="/etc/apache2/conf-available/blinkymap.conf"
 
+# ── Locate the BlinkyMap plugin directory ─────────────────────────────────────
+# FPP 8.0+ uses /home/fpp/media/plugins/; FPP 6-7 used /home/fpp/plugins/
+PLUGIN_DIR=""
+for candidate in \
+    "/home/fpp/media/plugins/blinkymap" \
+    "/home/fpp/media/plugins/BlinkyMap" \
+    "/home/fpp/plugins/blinkymap" \
+    "/home/fpp/plugins/BlinkyMap"; do
+    [ -d "$candidate" ] && { PLUGIN_DIR="$candidate"; break; }
+done
+
+if [ -z "$PLUGIN_DIR" ]; then
+    echo "ERROR: BlinkyMap plugin not found in /home/fpp/media/plugins/ or /home/fpp/plugins/"
+    echo "Install the plugin first, then re-run this script."
+    exit 1
+fi
+PLUGIN_NAME="$(basename "$PLUGIN_DIR")"
+echo "  Found plugin at: ${PLUGIN_DIR}"
+
 # ── Detect FPP DocumentRoot from running Apache config ────────────────────────
 FPP_DOCROOT=$(grep -rh "^[[:space:]]*DocumentRoot" /etc/apache2/sites-enabled/ 2>/dev/null \
     | grep -v "#" | awk '{print $2}' | head -1)
@@ -32,8 +51,8 @@ cat > "$CONF" <<APACHECONF
 ProxyPass /blinkymap-ws ws://127.0.0.1:8765
 ProxyPassReverse /blinkymap-ws ws://127.0.0.1:8765
 
-Alias /plugin/blinkymap /home/fpp/media/plugins/blinkymap/www
-<Directory /home/fpp/media/plugins/blinkymap/www>
+Alias /plugin/${PLUGIN_NAME} ${PLUGIN_DIR}/www
+<Directory ${PLUGIN_DIR}/www>
     Options FollowSymLinks
     AllowOverride None
     Require all granted
@@ -103,5 +122,5 @@ fi
 MY_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "your-pi-ip")
 echo ""
 echo "BlinkyMap ready:"
-echo "  HTTP:  http://${MY_IP}/plugin/blinkymap/"
-echo "  HTTPS: https://${MY_IP}/plugin/blinkymap/  ← use this for camera access"
+echo "  HTTP:  http://${MY_IP}/plugin/${PLUGIN_NAME}/"
+echo "  HTTPS: https://${MY_IP}/plugin/${PLUGIN_NAME}/  ← use this for camera access"
