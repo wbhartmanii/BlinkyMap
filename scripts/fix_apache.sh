@@ -13,6 +13,8 @@ if [ -z "$PHP_SOCK" ]; then
     PHP_SOCK="/run/php/php8.2-fpm.sock"
 fi
 
+a2enmod headers >/dev/null 2>&1 || true
+
 cat > "$CONF" <<APACHECONF
 Alias /plugin/blinkymap /home/fpp/media/plugins/blinkymap/www
 <Directory /home/fpp/media/plugins/blinkymap/www>
@@ -23,6 +25,7 @@ Alias /plugin/blinkymap /home/fpp/media/plugins/blinkymap/www
     <FilesMatch "\\.php\$">
         SetHandler "proxy:unix:${PHP_SOCK}|fcgi://localhost"
     </FilesMatch>
+    Header always unset Content-Security-Policy
 </Directory>
 APACHECONF
 

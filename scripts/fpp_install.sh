@@ -43,6 +43,8 @@ if [ -d /etc/apache2/conf-available ]; then
     PHP_SOCK=$(ls /run/php/php*-fpm.sock 2>/dev/null | head -1)
     [ -z "$PHP_SOCK" ] && PHP_SOCK="/run/php/php8.2-fpm.sock"
 
+    a2enmod headers >/dev/null 2>&1 || true
+
     cat > "$CONF" <<APACHECONF
 Alias /plugin/${PLUGIN_NAME} /home/fpp/media/plugins/${PLUGIN_NAME}/www
 <Directory /home/fpp/media/plugins/${PLUGIN_NAME}/www>
@@ -53,6 +55,7 @@ Alias /plugin/${PLUGIN_NAME} /home/fpp/media/plugins/${PLUGIN_NAME}/www
     <FilesMatch "\\.php\$">
         SetHandler "proxy:unix:${PHP_SOCK}|fcgi://localhost"
     </FilesMatch>
+    Header always unset Content-Security-Policy
 </Directory>
 APACHECONF
 
