@@ -181,7 +181,7 @@ Any device that listens for E1.31/sACN on UDP port 5568:
 
 ## Camera tips
 
-- Darker room = better LED detection (turn off overhead lights if possible).
+- Lower ambient light = better LED detection. Indoors: turn off overhead lights. Outdoors: scan at dusk or after dark.
 - Increase **capture delay** if your camera is slow to adjust exposure
   (0.2–0.3 s is usually enough).
 - **IP cameras / phones (desktop app):** enter the RTSP URL
