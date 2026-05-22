@@ -39,8 +39,8 @@ curl -fsSL "${THREE_BASE}/examples/jsm/controls/OrbitControls.js" \
 sed -i "s|from 'three'|from './three.module.min.js'|g" \
     "$WWW_DIR/vendor/OrbitControls.js"
 
-# ── Apache alias ───────────────────────────────────────────────────────────────
-echo "BlinkyMap: configuring Apache alias..."
+# ── Apache alias + WebSocket proxy ─────────────────────────────────────────────
+echo "BlinkyMap: configuring Apache..."
 if [ -d /etc/apache2/conf-available ]; then
     PLUGIN_NAME="$(basename "$PLUGIN_DIR")"
     CONF="/etc/apache2/conf-available/blinkymap.conf"
@@ -68,11 +68,69 @@ Alias /plugin/${PLUGIN_NAME} /home/fpp/media/plugins/${PLUGIN_NAME}/www
 APACHECONF
 
     a2enconf blinkymap >/dev/null 2>&1 || true
-    apache2ctl configtest >/dev/null 2>&1 && systemctl reload apache2 \
-        && echo "BlinkyMap: Apache reloaded." \
-        || echo "WARNING: Apache config test failed — check /etc/apache2/conf-available/blinkymap.conf"
 else
     echo "WARNING: Apache conf-available not found — skipping Apache config"
+fi
+
+# ── HTTPS with self-signed certificate ────────────────────────────────────────
+# Required for getUserMedia (camera) to work in any browser without flags.
+echo "BlinkyMap: enabling HTTPS..."
+if [ -d /etc/apache2/sites-available ] && command -v openssl &>/dev/null; then
+
+    # Only create the SSL site if nothing is already listening on 443
+    if ! ls /etc/apache2/sites-enabled/ 2>/dev/null | grep -qi ssl; then
+        SSL_DIR="/etc/apache2/ssl/blinkymap"
+        mkdir -p "$SSL_DIR"
+
+        if [ ! -f "$SSL_DIR/server.crt" ]; then
+            MY_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+            MY_HOST=$(hostname 2>/dev/null || echo "fpp")
+            SAN="DNS:${MY_HOST},DNS:localhost"
+            [ -n "$MY_IP" ] && SAN="${SAN},IP:${MY_IP}"
+
+            openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+                -keyout "$SSL_DIR/server.key" \
+                -out    "$SSL_DIR/server.crt" \
+                -subj   "/CN=${MY_HOST}/O=BlinkyMap-FPP" \
+                -addext "subjectAltName=${SAN}" \
+                2>/dev/null \
+            || openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+                -keyout "$SSL_DIR/server.key" \
+                -out    "$SSL_DIR/server.crt" \
+                -subj   "/CN=${MY_HOST}/O=BlinkyMap-FPP" \
+                2>/dev/null
+            chmod 600 "$SSL_DIR/server.key"
+            echo "BlinkyMap: self-signed certificate generated (valid 10 years)."
+        fi
+
+        a2enmod ssl >/dev/null 2>&1 || true
+
+        cat > /etc/apache2/sites-available/blinkymap-ssl.conf <<SSLCONF
+<IfModule mod_ssl.c>
+    <VirtualHost _default_:443>
+        DocumentRoot /opt/fpp/www
+        SSLEngine on
+        SSLCertificateFile    ${SSL_DIR}/server.crt
+        SSLCertificateKeyFile ${SSL_DIR}/server.key
+    </VirtualHost>
+</IfModule>
+SSLCONF
+
+        a2ensite blinkymap-ssl >/dev/null 2>&1 || true
+        echo "BlinkyMap: HTTPS site enabled."
+        echo "  → Accept the browser's self-signed cert warning once, then camera works."
+    else
+        echo "BlinkyMap: SSL already configured, skipping."
+    fi
+else
+    echo "WARNING: openssl not found — skipping HTTPS (camera needs Chrome flag workaround)"
+fi
+
+# ── Reload Apache once after all config changes ────────────────────────────────
+if [ -d /etc/apache2 ]; then
+    apache2ctl configtest >/dev/null 2>&1 \
+        && systemctl reload apache2 && echo "BlinkyMap: Apache reloaded." \
+        || echo "WARNING: Apache config test failed — check /etc/apache2/conf-available/blinkymap.conf"
 fi
 
 echo "BlinkyMap: install complete."

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Adds the Apache alias that maps /plugin/blinkymap/ to the plugin's www/ dir.
+# Configures Apache for BlinkyMap: alias, WebSocket proxy, and HTTPS.
 # Run once manually if the plugin was installed before this script existed:
 #   curl -fsSL https://raw.githubusercontent.com/wbhartmanii/BlinkyMap/main/scripts/fix_apache.sh | sudo bash
 
@@ -9,10 +9,9 @@ CONF="/etc/apache2/conf-available/blinkymap.conf"
 
 # Detect the PHP-FPM socket (php8.x-fpm.sock or php-fpm.sock)
 PHP_SOCK=$(ls /run/php/php*-fpm.sock 2>/dev/null | head -1)
-if [ -z "$PHP_SOCK" ]; then
-    PHP_SOCK="/run/php/php8.2-fpm.sock"
-fi
+[ -z "$PHP_SOCK" ] && PHP_SOCK="/run/php/php8.2-fpm.sock"
 
+# ── Apache alias + WebSocket proxy ────────────────────────────────────────────
 a2enmod proxy proxy_http proxy_wstunnel >/dev/null 2>&1 || true
 
 cat > "$CONF" <<APACHECONF
@@ -33,7 +32,57 @@ Alias /plugin/blinkymap /home/fpp/media/plugins/blinkymap/www
 APACHECONF
 
 a2enconf blinkymap >/dev/null 2>&1 || true
+
+# ── HTTPS with self-signed certificate ────────────────────────────────────────
+if command -v openssl &>/dev/null && ! ls /etc/apache2/sites-enabled/ 2>/dev/null | grep -qi ssl; then
+    SSL_DIR="/etc/apache2/ssl/blinkymap"
+    mkdir -p "$SSL_DIR"
+
+    if [ ! -f "$SSL_DIR/server.crt" ]; then
+        MY_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+        MY_HOST=$(hostname 2>/dev/null || echo "fpp")
+        SAN="DNS:${MY_HOST},DNS:localhost"
+        [ -n "$MY_IP" ] && SAN="${SAN},IP:${MY_IP}"
+
+        openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+            -keyout "$SSL_DIR/server.key" \
+            -out    "$SSL_DIR/server.crt" \
+            -subj   "/CN=${MY_HOST}/O=BlinkyMap-FPP" \
+            -addext "subjectAltName=${SAN}" \
+            2>/dev/null \
+        || openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+            -keyout "$SSL_DIR/server.key" \
+            -out    "$SSL_DIR/server.crt" \
+            -subj   "/CN=${MY_HOST}/O=BlinkyMap-FPP" \
+            2>/dev/null
+        chmod 600 "$SSL_DIR/server.key"
+        echo "Self-signed certificate generated (valid 10 years)."
+    fi
+
+    a2enmod ssl >/dev/null 2>&1 || true
+
+    cat > /etc/apache2/sites-available/blinkymap-ssl.conf <<SSLCONF
+<IfModule mod_ssl.c>
+    <VirtualHost _default_:443>
+        DocumentRoot /opt/fpp/www
+        SSLEngine on
+        SSLCertificateFile    ${SSL_DIR}/server.crt
+        SSLCertificateKeyFile ${SSL_DIR}/server.key
+    </VirtualHost>
+</IfModule>
+SSLCONF
+
+    a2ensite blinkymap-ssl >/dev/null 2>&1 || true
+    echo "HTTPS enabled. Accept the browser's self-signed cert warning once — camera will then work."
+else
+    echo "SSL already configured or openssl not found — skipping HTTPS."
+fi
+
+# ── Reload Apache ──────────────────────────────────────────────────────────────
 apache2ctl configtest
 systemctl reload apache2
-echo "BlinkyMap: Apache alias active (PHP-FPM socket: ${PHP_SOCK})"
-echo "URL: http://$(hostname -I | awk '{print $1}')/plugin/blinkymap/"
+
+MY_IP=$(hostname -I | awk '{print $1}')
+echo "BlinkyMap ready:"
+echo "  HTTP:  http://${MY_IP}/plugin/blinkymap/"
+echo "  HTTPS: https://${MY_IP}/plugin/blinkymap/  (accept cert warning for camera access)"
