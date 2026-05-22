@@ -1,13 +1,18 @@
 #!/bin/bash
 # Configures Apache for BlinkyMap: alias, WebSocket proxy, and HTTPS.
+# Supports Raspberry Pi OS (Bullseye/Bookworm) and Debian 11/12 x86.
+#
 # Run once manually if the plugin was installed before this script existed:
 #   curl -fsSL https://raw.githubusercontent.com/wbhartmanii/BlinkyMap/main/scripts/fix_apache.sh | sudo bash
 
 set -euo pipefail
 
+. /etc/os-release 2>/dev/null || true
+echo "BlinkyMap fix_apache: running on ${PRETTY_NAME:-unknown OS}"
+
 CONF="/etc/apache2/conf-available/blinkymap.conf"
 
-# Detect the PHP-FPM socket (php8.x-fpm.sock or php-fpm.sock)
+# Detect the PHP-FPM socket (handles php7.4, php8.1, php8.2, php8.3, etc.)
 PHP_SOCK=$(ls /run/php/php*-fpm.sock 2>/dev/null | head -1)
 [ -z "$PHP_SOCK" ] && PHP_SOCK="/run/php/php8.2-fpm.sock"
 
@@ -44,6 +49,7 @@ if command -v openssl &>/dev/null && ! ls /etc/apache2/sites-enabled/ 2>/dev/nul
         SAN="DNS:${MY_HOST},DNS:localhost"
         [ -n "$MY_IP" ] && SAN="${SAN},IP:${MY_IP}"
 
+        # -addext requires OpenSSL 1.1.1+ (Bullseye/Bookworm); fall back for older builds
         openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
             -keyout "$SSL_DIR/server.key" \
             -out    "$SSL_DIR/server.crt" \
@@ -82,7 +88,8 @@ fi
 apache2ctl configtest
 systemctl reload apache2
 
-MY_IP=$(hostname -I | awk '{print $1}')
+MY_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "your-pi-ip")
+echo ""
 echo "BlinkyMap ready:"
 echo "  HTTP:  http://${MY_IP}/plugin/blinkymap/"
-echo "  HTTPS: https://${MY_IP}/plugin/blinkymap/  (accept cert warning for camera access)"
+echo "  HTTPS: https://${MY_IP}/plugin/blinkymap/  ← use this for camera access"

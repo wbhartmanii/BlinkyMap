@@ -1,18 +1,33 @@
 #!/bin/bash
 # BlinkyMap FPP Plugin installer
 # Called by FPP Plugin Manager after extracting the plugin zip.
+# Supports: Raspberry Pi OS (Bullseye/Bookworm) and Debian 11/12 x86.
 
 set -e
 
 PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"   # scripts/ → plugin root
 WWW_DIR="$PLUGIN_DIR/www/blinkymap"
 
-# ── Python dependencies ────────────────────────────────────────────────────────
-echo "BlinkyMap: installing Python dependencies..."
+# ── OS detection (informational) ───────────────────────────────────────────────
+. /etc/os-release 2>/dev/null || true
+echo "BlinkyMap: installing on ${PRETTY_NAME:-unknown OS}"
+
+# ── System dependencies ────────────────────────────────────────────────────────
+echo "BlinkyMap: installing system dependencies..."
 if command -v apt-get &>/dev/null; then
-    # Debian/Ubuntu (FPP on Pi, Proxmox) — apt packages avoid the
-    # externally-managed-environment restriction on Python 3.11+
-    apt-get install -y -q python3-numpy python3-websockets python3-requests 2>&1 | tail -5
+    apt-get install -y -q openssl python3-numpy python3-requests 2>&1 | tail -5
+
+    # python3-websockets not in Buster repos — try apt, fall back to pip
+    if ! apt-get install -y -q python3-websockets 2>/dev/null; then
+        echo "  python3-websockets not in apt, trying pip..."
+        if command -v pip3 &>/dev/null; then
+            pip3 install --quiet websockets 2>&1 | tail -3
+        elif command -v python3 &>/dev/null; then
+            python3 -m pip install --break-system-packages --quiet websockets 2>&1 | tail -3
+        else
+            echo "WARNING: could not install python3-websockets"
+        fi
+    fi
 elif command -v pip3 &>/dev/null; then
     pip3 install --quiet --upgrade numpy websockets requests 2>&1 | tail -5
 elif command -v python3 &>/dev/null; then
@@ -73,12 +88,14 @@ else
 fi
 
 # ── HTTPS with self-signed certificate ────────────────────────────────────────
-# Required for getUserMedia (camera) to work in any browser without flags.
+# getUserMedia (camera) requires a secure context in all modern browsers.
 echo "BlinkyMap: enabling HTTPS..."
 if [ -d /etc/apache2/sites-available ] && command -v openssl &>/dev/null; then
 
-    # Only create the SSL site if nothing is already listening on 443
-    if ! ls /etc/apache2/sites-enabled/ 2>/dev/null | grep -qi ssl; then
+    # Skip if any SSL site is already enabled
+    if ls /etc/apache2/sites-enabled/ 2>/dev/null | grep -qi ssl; then
+        echo "  SSL already configured — skipping."
+    else
         SSL_DIR="/etc/apache2/ssl/blinkymap"
         mkdir -p "$SSL_DIR"
 
@@ -88,6 +105,7 @@ if [ -d /etc/apache2/sites-available ] && command -v openssl &>/dev/null; then
             SAN="DNS:${MY_HOST},DNS:localhost"
             [ -n "$MY_IP" ] && SAN="${SAN},IP:${MY_IP}"
 
+            # -addext requires OpenSSL 1.1.1+ (Bullseye/Bookworm); fall back for older builds
             openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
                 -keyout "$SSL_DIR/server.key" \
                 -out    "$SSL_DIR/server.crt" \
@@ -100,7 +118,7 @@ if [ -d /etc/apache2/sites-available ] && command -v openssl &>/dev/null; then
                 -subj   "/CN=${MY_HOST}/O=BlinkyMap-FPP" \
                 2>/dev/null
             chmod 600 "$SSL_DIR/server.key"
-            echo "BlinkyMap: self-signed certificate generated (valid 10 years)."
+            echo "  Self-signed certificate generated (valid 10 years)."
         fi
 
         a2enmod ssl >/dev/null 2>&1 || true
@@ -117,13 +135,10 @@ if [ -d /etc/apache2/sites-available ] && command -v openssl &>/dev/null; then
 SSLCONF
 
         a2ensite blinkymap-ssl >/dev/null 2>&1 || true
-        echo "BlinkyMap: HTTPS site enabled."
-        echo "  → Accept the browser's self-signed cert warning once, then camera works."
-    else
-        echo "BlinkyMap: SSL already configured, skipping."
+        echo "  HTTPS enabled. Accept the browser's self-signed cert warning once."
     fi
 else
-    echo "WARNING: openssl not found — skipping HTTPS (camera needs Chrome flag workaround)"
+    echo "  WARNING: openssl not found — camera will need the Chrome insecure-origin flag."
 fi
 
 # ── Reload Apache once after all config changes ────────────────────────────────
@@ -133,4 +148,8 @@ if [ -d /etc/apache2 ]; then
         || echo "WARNING: Apache config test failed — check /etc/apache2/conf-available/blinkymap.conf"
 fi
 
-echo "BlinkyMap: install complete."
+MY_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "your-pi-ip")
+echo ""
+echo "BlinkyMap install complete."
+echo "  HTTP:  http://${MY_IP}/plugin/blinkymap/"
+echo "  HTTPS: https://${MY_IP}/plugin/blinkymap/  ← use this for camera access"
