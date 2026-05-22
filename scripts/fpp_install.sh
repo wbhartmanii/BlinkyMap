@@ -9,12 +9,17 @@ WWW_DIR="$PLUGIN_DIR/www/blinkymap"
 
 # ── Python dependencies ────────────────────────────────────────────────────────
 echo "BlinkyMap: installing Python dependencies..."
-if command -v pip3 &>/dev/null; then
+if command -v apt-get &>/dev/null; then
+    # Debian/Ubuntu (FPP on Pi, Proxmox) — apt packages avoid the
+    # externally-managed-environment restriction on Python 3.11+
+    apt-get install -y -q python3-numpy python3-websockets python3-requests 2>&1 | tail -5
+elif command -v pip3 &>/dev/null; then
     pip3 install --quiet --upgrade numpy websockets requests 2>&1 | tail -5
 elif command -v python3 &>/dev/null; then
-    python3 -m pip install --quiet --upgrade numpy websockets requests 2>&1 | tail -5
+    python3 -m pip install --break-system-packages --quiet --upgrade \
+        numpy websockets requests 2>&1 | tail -5
 else
-    echo "WARNING: pip3/python3 not found — skipping Python deps"
+    echo "WARNING: no package manager found — skipping Python deps"
 fi
 
 # ── Three.js vendor files ──────────────────────────────────────────────────────
