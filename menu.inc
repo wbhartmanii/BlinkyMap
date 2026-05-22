@@ -1,9 +1,6 @@
 <?php
-$menuEntries = array(
-    array(
-        'text'  => 'BlinkyMap',
-        'type'  => 'content',
-        'page'  => 'www/index.php',
-        'wrap'  => 0,
-    ),
+$menuEntries[] = array(
+    'text' => 'BlinkyMap',
+    'link' => '/plugin/blinkymap/index.php',
+    'type' => 'mainMenu',
 );
