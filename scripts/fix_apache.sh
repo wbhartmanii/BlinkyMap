@@ -13,9 +13,13 @@ if [ -z "$PHP_SOCK" ]; then
     PHP_SOCK="/run/php/php8.2-fpm.sock"
 fi
 
-a2enmod headers >/dev/null 2>&1 || true
+a2enmod proxy proxy_http proxy_wstunnel >/dev/null 2>&1 || true
 
 cat > "$CONF" <<APACHECONF
+# Proxy WebSocket at same-origin path so FPP's CSP 'self' allows it
+ProxyPass /blinkymap-ws ws://127.0.0.1:8765
+ProxyPassReverse /blinkymap-ws ws://127.0.0.1:8765
+
 Alias /plugin/blinkymap /home/fpp/media/plugins/blinkymap/www
 <Directory /home/fpp/media/plugins/blinkymap/www>
     Options FollowSymLinks
@@ -25,7 +29,6 @@ Alias /plugin/blinkymap /home/fpp/media/plugins/blinkymap/www
     <FilesMatch "\\.php\$">
         SetHandler "proxy:unix:${PHP_SOCK}|fcgi://localhost"
     </FilesMatch>
-    Header always unset Content-Security-Policy
 </Directory>
 APACHECONF
 

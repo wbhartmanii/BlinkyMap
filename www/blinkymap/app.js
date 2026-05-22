@@ -10,8 +10,8 @@
 import { openCamera, captureBackground, detectLED } from "./camera.js";
 import { Viewer3D } from "./viewer3d.js";
 
-// ── Infer WebSocket URL (same host, port 8765) ────────────────────────────────
-const WS_URL = `ws://${location.hostname}:8765`;
+// ── WebSocket URL — proxied through Apache at same origin to satisfy CSP ─────
+const WS_URL = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/blinkymap-ws`;
 
 // ── DOM references ────────────────────────────────────────────────────────────
 const wsIndicator    = document.getElementById("ws-indicator");
