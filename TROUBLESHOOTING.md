@@ -2,6 +2,21 @@
 
 ---
 
+## Plugin Manager: "Failed to fetch pluginInfo.json" / HTTP 400
+
+FPP's Plugin Manager requires the **full path** to `pluginInfo.json`, not just
+the repo URL. Enter this in the Plugin Manager URL field:
+
+```
+https://github.com/wbhartmanii/BlinkyMap/blob/main/pluginInfo.json
+```
+
+FPP internally converts this to the raw GitHub URL. Entering only
+`https://github.com/wbhartmanii/BlinkyMap` (no file path) results in a
+malformed raw URL and HTTP 400.
+
+---
+
 ## Camera error: "Cannot read properties of undefined (reading 'getUserMedia')"
 
 **Cause:** Browsers block camera access (`getUserMedia`) on plain HTTP. It only

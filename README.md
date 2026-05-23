@@ -15,10 +15,11 @@ this is the easiest path — your phone browser is the camera, no laptop require
 **Compatibility:** FPP 6.0+ · Raspberry Pi OS Bullseye/Bookworm · Debian 11/12
 
 1. In the FPP web UI go to **Content Setup → Plugin Manager**
-2. Enter the plugin URL:
+2. Enter the full path to the plugin info file:
    ```
-   https://github.com/wbhartmanii/BlinkyMap
+   https://github.com/wbhartmanii/BlinkyMap/blob/main/pluginInfo.json
    ```
+   > FPP requires the direct path to `pluginInfo.json`, not just the repo URL.
 3. Click **Install** — the install script automatically:
    - Installs Python deps (`numpy`, `websockets`, `requests`) via apt
    - Downloads and vendors Three.js locally (needs internet once)
