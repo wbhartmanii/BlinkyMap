@@ -7,6 +7,12 @@
  * then redirects the browser to the single-page app.
  */
 
+// ── force HTTPS — camera (getUserMedia) requires a secure context ─────────────
+if (empty($_SERVER['HTTPS']) || $_SERVER['HTTPS'] === 'off') {
+    header('Location: https://' . $_SERVER['HTTP_HOST'] . $_SERVER['REQUEST_URI'], true, 301);
+    exit;
+}
+
 // ── paths ──────────────────────────────────────────────────────────────────────
 $plugin_dir    = dirname(__FILE__, 2);          // www/ → plugin root
 $plugin_name   = basename($plugin_dir);         // 'blinkymap' or 'BlinkyMap' — whatever FPP cloned

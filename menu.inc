@@ -3,7 +3,7 @@ $menuEntries = array(
     array(
         'text'  => 'BlinkyMap',
         'type'  => 'content',
-        'page'  => 'www/index.php',
+        'page'  => 'index.php',
         'wrap'  => 0,
     ),
 );
