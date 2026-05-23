@@ -26,6 +26,7 @@ const cfgDelay       = document.getElementById("cfg-delay");
 const cfgFov         = document.getElementById("cfg-fov");
 const btnSaveConfig  = document.getElementById("btn-save-config");
 const btnTestBlink   = document.getElementById("btn-test-blink");
+const btnStopTest    = document.getElementById("btn-stop-test");
 const testResultMsg  = document.getElementById("test-result-msg");
 const btnOpenCamera  = document.getElementById("btn-open-camera");
 const camPreview     = document.getElementById("cam-preview");
@@ -190,7 +191,14 @@ async function handleServerMessage(msg) {
       if (viewer) viewer.setSuggestion(msg.angle, msg.distance);
       break;
 
-    case "test_result":
+    case "test_sweep_progress":
+      showTestResult(true,
+        `Pixel ${msg.index + 1} / ${msg.total} · ${msg.mode} · ch ${msg.start_ch + msg.index * 3}`);
+      break;
+
+    case "test_sweep_done":
+      btnTestBlink.style.display = "block";
+      btnStopTest.style.display  = "none";
       showTestResult(msg.ok, msg.message);
       break;
 
@@ -216,8 +224,15 @@ btnSaveConfig.addEventListener("click", () => {
 
 // ── Test blink ────────────────────────────────────────────────────────────────
 btnTestBlink.addEventListener("click", () => {
-  send({ type: "test_blink" });
-  showTestResult(true, "Sending…");
+  send({ type: "test_sweep" });
+  btnTestBlink.style.display = "none";
+  btnStopTest.style.display  = "block";
+  showTestResult(true, "Starting sweep…");
+});
+
+btnStopTest.addEventListener("click", () => {
+  send({ type: "stop_test" });
+  btnStopTest.style.display = "none";
 });
 
 let _testResultTimer = null;

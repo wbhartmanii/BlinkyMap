@@ -681,6 +681,7 @@ class BlinkyServer:
         self.config = ControllerConfig()
         self.current_session: Optional[SessionConfig] = None
         self.scan_task: Optional[asyncio.Task] = None
+        self.test_task: Optional[asyncio.Task] = None
         self.clients: Set[WebSocketServerProtocol] = set()
 
         # Per-pixel detection response — set by incoming "detection"/"no_detection"
@@ -772,8 +773,14 @@ class BlinkyServer:
             self._last_detection = None
             self._detection_event.set()
 
-        elif t == "test_blink":
-            asyncio.create_task(self._run_test_blink(ws))
+        elif t == "test_sweep":
+            if self.test_task and not self.test_task.done():
+                return
+            self.test_task = asyncio.create_task(self._run_test_sweep(ws))
+
+        elif t == "stop_test":
+            if self.test_task:
+                self.test_task.cancel()
 
         elif t == "stop_scan":
             if self.scan_task:
@@ -789,34 +796,58 @@ class BlinkyServer:
                 resp["csv"] = export_csv(self.model)
             await ws.send(json.dumps(resp))
 
-    async def _run_test_blink(self, ws: WebSocketServerProtocol):
+    async def _run_test_sweep(self, ws: WebSocketServerProtocol):
         cfg  = self.config
-        loop = asyncio.get_event_loop()
-
-        await ws.send(json.dumps({"type": "test_result", "ok": True,
-                                   "message": "Connecting…"}))
-
-        def _blink():
-            output = _make_output(cfg)
-            mode = (f"FPP API @ {cfg.host}"
-                    if isinstance(output, FPPOutput)
-                    else f"E1.31 → {cfg.host}")
-            output.pixel_on(0)
-            time.sleep(1.5)
-            output.close()
-            return mode
+        loop = asyncio.get_running_loop()
+        output = None
 
         try:
-            mode = await loop.run_in_executor(None, _blink)
+            output = await loop.run_in_executor(None, lambda: _make_output(cfg))
+            mode = "FPP API" if isinstance(output, FPPOutput) else "E1.31"
+            n = cfg.pixel_count
+
+            for idx in range(n):
+                def _one(i=idx, o=output):
+                    o.pixel_on(i)
+                    time.sleep(0.12)
+                    o.all_off()
+                    time.sleep(0.03)
+
+                await loop.run_in_executor(None, _one)
+                await ws.send(json.dumps({
+                    "type": "test_sweep_progress",
+                    "index": idx,
+                    "total": n,
+                    "mode": mode,
+                    "start_ch": cfg.start_channel,
+                }))
+
             await ws.send(json.dumps({
-                "type": "test_result", "ok": True,
-                "message": f"Pixel 1 on via {mode} (ch {cfg.start_channel}) — did it blink?",
+                "type": "test_sweep_done", "ok": True,
+                "message": f"Sweep complete — {n} pixels via {mode} (ch {cfg.start_channel}+)",
             }))
+
+        except asyncio.CancelledError:
+            if output:
+                try:
+                    await loop.run_in_executor(None, output.all_off)
+                except Exception:
+                    pass
+            await ws.send(json.dumps({
+                "type": "test_sweep_done", "ok": True, "message": "Stopped",
+            }))
+
         except Exception as e:
             await ws.send(json.dumps({
-                "type": "test_result", "ok": False,
-                "message": f"Error: {e}",
+                "type": "test_sweep_done", "ok": False, "message": f"Error: {e}",
             }))
+
+        finally:
+            if output:
+                try:
+                    await loop.run_in_executor(None, output.close)
+                except Exception:
+                    pass
 
     async def _run_scan(self):
         sess = self.current_session
