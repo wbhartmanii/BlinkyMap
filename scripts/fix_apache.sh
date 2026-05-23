@@ -66,7 +66,9 @@ APACHECONF
 a2enconf blinkymap >/dev/null 2>&1 || true
 
 # ── HTTPS with self-signed certificate ────────────────────────────────────────
-if command -v openssl &>/dev/null && ! ls /etc/apache2/sites-enabled/ 2>/dev/null | grep -qi ssl; then
+# Always (re)write blinkymap-ssl.conf — ensures the Directory block is present
+# even if the site was installed by an older version of this script.
+if command -v openssl &>/dev/null && [ -d /etc/apache2/sites-available ]; then
     SSL_DIR="/etc/apache2/ssl/blinkymap"
     mkdir -p "$SSL_DIR"
 
@@ -76,7 +78,6 @@ if command -v openssl &>/dev/null && ! ls /etc/apache2/sites-enabled/ 2>/dev/nul
         SAN="DNS:${MY_HOST},DNS:localhost"
         [ -n "$MY_IP" ] && SAN="${SAN},IP:${MY_IP}"
 
-        # -addext requires OpenSSL 1.1.1+ (Bullseye/Bookworm); fall back for older builds
         openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
             -keyout "$SSL_DIR/server.key" \
             -out    "$SSL_DIR/server.crt" \
@@ -101,14 +102,22 @@ if command -v openssl &>/dev/null && ! ls /etc/apache2/sites-enabled/ 2>/dev/nul
         SSLEngine on
         SSLCertificateFile    ${SSL_DIR}/server.crt
         SSLCertificateKeyFile ${SSL_DIR}/server.key
+        <Directory ${FPP_DOCROOT}>
+            Options -Indexes +FollowSymLinks
+            AllowOverride All
+            Require all granted
+            <FilesMatch "\.php\$">
+                SetHandler "proxy:unix:${PHP_SOCK}|fcgi://localhost"
+            </FilesMatch>
+        </Directory>
     </VirtualHost>
 </IfModule>
 SSLCONF
 
     a2ensite blinkymap-ssl >/dev/null 2>&1 || true
-    echo "HTTPS enabled. Accept the browser's self-signed cert warning once — camera will then work."
+    echo "HTTPS configured. Accept the browser's self-signed cert warning once — camera will then work."
 else
-    echo "SSL already configured or openssl not found — skipping HTTPS."
+    echo "openssl not found or no Apache sites-available — skipping HTTPS."
 fi
 
 # ── Reload Apache (systemd or SysVinit) ───────────────────────────────────────

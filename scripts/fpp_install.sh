@@ -138,6 +138,14 @@ if [ -d /etc/apache2/sites-available ] && command -v openssl &>/dev/null; then
         SSLEngine on
         SSLCertificateFile    ${SSL_DIR}/server.crt
         SSLCertificateKeyFile ${SSL_DIR}/server.key
+        <Directory ${FPP_DOCROOT}>
+            Options -Indexes +FollowSymLinks
+            AllowOverride All
+            Require all granted
+            <FilesMatch "\.php\$">
+                SetHandler "proxy:unix:${PHP_SOCK}|fcgi://localhost"
+            </FilesMatch>
+        </Directory>
     </VirtualHost>
 </IfModule>
 SSLCONF
