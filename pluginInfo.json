@@ -9,9 +9,9 @@
   "allowUpdates": 1,
   "versions": [
     {
-      "minFPPVersion": "3.0",
+      "minFPPVersion": "6.0",
       "maxFPPVersion": "0",
-      "branch": "main",
+      "branch": "claude/blinkymap-3d-modeling-J34d4",
       "sha": "",
       "dependencies": {
         "plugins": [],
