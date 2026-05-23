@@ -902,11 +902,11 @@ class BlinkyServer:
                         self.model.record_detection(sess.session_id, idx, det)
                         detected += 1
 
-                output.all_off()
                 await self.broadcast({"type": "pixel_off"})
                 await self.broadcast({"type": "progress", "index": idx, "total": total})
                 await asyncio.sleep(0.02)
 
+            output.all_off()
             await self.broadcast({
                 "type": "scan_complete",
                 "session": sess.session_id,
