@@ -25,6 +25,8 @@ const cfgPixels      = document.getElementById("cfg-pixels");
 const cfgDelay       = document.getElementById("cfg-delay");
 const cfgFov         = document.getElementById("cfg-fov");
 const btnSaveConfig  = document.getElementById("btn-save-config");
+const btnTestBlink   = document.getElementById("btn-test-blink");
+const testResultMsg  = document.getElementById("test-result-msg");
 const btnOpenCamera  = document.getElementById("btn-open-camera");
 const camPreview     = document.getElementById("cam-preview");
 const camCanvas      = document.getElementById("cam-canvas");
@@ -188,6 +190,10 @@ async function handleServerMessage(msg) {
       if (viewer) viewer.setSuggestion(msg.angle, msg.distance);
       break;
 
+    case "test_result":
+      showTestResult(msg.ok, msg.message);
+      break;
+
     case "export_ready":
       if (msg.xmodel) triggerDownload("BlinkyTree.xmodel", msg.xmodel, "text/xml");
       if (msg.csv)    triggerDownload("BlinkyTree.csv",    msg.csv,    "text/csv");
@@ -207,6 +213,24 @@ btnSaveConfig.addEventListener("click", () => {
   });
   statusMsg("Config sent");
 });
+
+// ── Test blink ────────────────────────────────────────────────────────────────
+btnTestBlink.addEventListener("click", () => {
+  send({ type: "test_blink" });
+  showTestResult(true, "Sending…");
+});
+
+let _testResultTimer = null;
+function showTestResult(ok, message) {
+  testResultMsg.textContent = message;
+  testResultMsg.className   = `test-result ${ok ? "test-ok" : "test-fail"}`;
+  testResultMsg.style.display = "block";
+  clearTimeout(_testResultTimer);
+  // Auto-hide after 8 s once we have a final answer (not "Connecting…"/"Sending…")
+  if (!message.endsWith("…")) {
+    _testResultTimer = setTimeout(() => { testResultMsg.style.display = "none"; }, 8000);
+  }
+}
 
 // ── Camera ────────────────────────────────────────────────────────────────────
 btnOpenCamera.addEventListener("click", async () => {

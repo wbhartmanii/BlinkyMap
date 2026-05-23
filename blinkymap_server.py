@@ -49,6 +49,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
+import requests
 
 try:
     import websockets
@@ -771,6 +772,9 @@ class BlinkyServer:
             self._last_detection = None
             self._detection_event.set()
 
+        elif t == "test_blink":
+            asyncio.create_task(self._run_test_blink(ws))
+
         elif t == "stop_scan":
             if self.scan_task:
                 self.scan_task.cancel()
@@ -784,6 +788,35 @@ class BlinkyServer:
             if fmt in ("csv", "both"):
                 resp["csv"] = export_csv(self.model)
             await ws.send(json.dumps(resp))
+
+    async def _run_test_blink(self, ws: WebSocketServerProtocol):
+        cfg  = self.config
+        loop = asyncio.get_event_loop()
+
+        await ws.send(json.dumps({"type": "test_result", "ok": True,
+                                   "message": "Connecting…"}))
+
+        def _blink():
+            output = _make_output(cfg)
+            mode = (f"FPP API @ {cfg.host}"
+                    if isinstance(output, FPPOutput)
+                    else f"E1.31 → {cfg.host}")
+            output.pixel_on(0)
+            time.sleep(1.5)
+            output.close()
+            return mode
+
+        try:
+            mode = await loop.run_in_executor(None, _blink)
+            await ws.send(json.dumps({
+                "type": "test_result", "ok": True,
+                "message": f"Pixel 1 on via {mode} (ch {cfg.start_channel}) — did it blink?",
+            }))
+        except Exception as e:
+            await ws.send(json.dumps({
+                "type": "test_result", "ok": False,
+                "message": f"Error: {e}",
+            }))
 
     async def _run_scan(self):
         sess = self.current_session

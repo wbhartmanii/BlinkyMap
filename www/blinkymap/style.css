@@ -123,6 +123,15 @@ input:focus { border-color: var(--accent); }
 .btn-danger:active { opacity: 0.75; }
 .wide { display: block; width: 100%; margin-bottom: 12px; }
 
+/* ── Test blink result ── */
+.test-result {
+  font-size: .85rem; padding: 8px 12px;
+  border-radius: var(--radius);
+  margin-bottom: 12px;
+}
+.test-ok   { background: #1a3320; color: var(--green); border: 1px solid #69f0ae44; }
+.test-fail { background: #3a1010; color: var(--red);   border: 1px solid #ef535044; }
+
 /* ── Camera preview ── */
 #cam-preview {
   width: 100%; border-radius: var(--radius);
