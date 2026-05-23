@@ -132,6 +132,15 @@ input:focus { border-color: var(--accent); }
 .test-ok   { background: #1a3320; color: var(--green); border: 1px solid #69f0ae44; }
 .test-fail { background: #3a1010; color: var(--red);   border: 1px solid #ef535044; }
 
+/* ── Controller connection status ── */
+.controller-status {
+  font-size: .82rem; padding: 7px 12px;
+  border-radius: var(--radius);
+  margin-top: 6px; margin-bottom: 4px;
+}
+.ctrl-ok   { background: #1a3320; color: var(--green); border: 1px solid #69f0ae44; }
+.ctrl-fail { background: #2a2a10; color: var(--yellow); border: 1px solid #ffee5844; }
+
 /* ── Camera preview ── */
 #cam-preview {
   width: 100%; border-radius: var(--radius);

@@ -24,8 +24,9 @@ const cfgStart       = document.getElementById("cfg-start");
 const cfgPixels      = document.getElementById("cfg-pixels");
 const cfgDelay       = document.getElementById("cfg-delay");
 const cfgFov         = document.getElementById("cfg-fov");
-const btnSaveConfig  = document.getElementById("btn-save-config");
-const btnTestBlink   = document.getElementById("btn-test-blink");
+const btnSaveConfig      = document.getElementById("btn-save-config");
+const controllerStatus   = document.getElementById("controller-status");
+const btnTestBlink       = document.getElementById("btn-test-blink");
 const btnStopTest    = document.getElementById("btn-stop-test");
 const testResultMsg  = document.getElementById("test-result-msg");
 const btnOpenCamera  = document.getElementById("btn-open-camera");
@@ -191,6 +192,12 @@ async function handleServerMessage(msg) {
       if (viewer) viewer.setSuggestion(msg.angle, msg.distance);
       break;
 
+    case "controller_status":
+      controllerStatus.textContent = msg.message;
+      controllerStatus.className   = `controller-status ${msg.ok ? "ctrl-ok" : "ctrl-fail"}`;
+      controllerStatus.style.display = "block";
+      break;
+
     case "test_sweep_progress":
       showTestResult(true,
         `Pixel ${msg.index + 1} / ${msg.total} · ${msg.mode} · ch ${msg.start_ch + msg.index * 3}`);
@@ -219,7 +226,9 @@ btnSaveConfig.addEventListener("click", () => {
     pixel_count: parseInt(cfgPixels.value),
     delay:       parseFloat(cfgDelay.value),
   });
-  statusMsg("Config sent");
+  controllerStatus.textContent = `Checking ${cfgHost.value.trim()}…`;
+  controllerStatus.className   = "controller-status ctrl-ok";
+  controllerStatus.style.display = "block";
 });
 
 // ── Test blink ────────────────────────────────────────────────────────────────

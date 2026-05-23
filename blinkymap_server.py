@@ -716,13 +716,14 @@ class BlinkyServer:
         t = msg.get("type")
 
         if t == "set_config":
-            self.config.host         = msg.get("host", self.config.host)
-            self.config.start_channel= int(msg.get("start_ch", self.config.start_channel))
-            self.config.pixel_count  = int(msg.get("pixel_count", self.config.pixel_count))
+            self.config.host              = msg.get("host", self.config.host)
+            self.config.start_channel     = int(msg.get("start_ch", self.config.start_channel))
+            self.config.pixel_count       = int(msg.get("pixel_count", self.config.pixel_count))
             self.config.inter_pixel_delay = float(msg.get("delay", self.config.inter_pixel_delay))
-            self.config.output_mode  = msg.get("output_mode", self.config.output_mode)
-            self.model.pixel_count   = self.config.pixel_count
-            await ws.send(json.dumps({"type": "status", "message": "Config updated"}))
+            self.config.output_mode       = msg.get("output_mode", self.config.output_mode)
+            self.model.pixel_count        = self.config.pixel_count
+            await ws.send(json.dumps({"type": "status", "message": "Config saved"}))
+            asyncio.create_task(self._probe_controller(ws))
 
         elif t == "set_session":
             sid = _new_session_id()
@@ -809,9 +810,7 @@ class BlinkyServer:
             for idx in range(n):
                 def _one(i=idx, o=output):
                     o.pixel_on(i)
-                    time.sleep(0.12)
-                    o.all_off()
-                    time.sleep(0.03)
+                    time.sleep(0.15)
 
                 await loop.run_in_executor(None, _one)
                 await ws.send(json.dumps({
@@ -822,6 +821,7 @@ class BlinkyServer:
                     "start_ch": cfg.start_channel,
                 }))
 
+            await loop.run_in_executor(None, output.all_off)
             await ws.send(json.dumps({
                 "type": "test_sweep_done", "ok": True,
                 "message": f"Sweep complete — {n} pixels via {mode} (ch {cfg.start_channel}+)",
@@ -848,6 +848,27 @@ class BlinkyServer:
                     await loop.run_in_executor(None, output.close)
                 except Exception:
                     pass
+
+    async def _probe_controller(self, ws: WebSocketServerProtocol):
+        cfg  = self.config
+        loop = asyncio.get_running_loop()
+        try:
+            if cfg.output_mode == "e131":
+                msg = f"E1.31 mode → {cfg.host} (ch {cfg.start_channel})"
+                ok  = True
+            else:
+                is_fpp = await loop.run_in_executor(None, lambda: _is_fpp(cfg.host))
+                if is_fpp:
+                    msg = f"FPP API connected @ {cfg.host} (ch {cfg.start_channel})"
+                    ok  = True
+                else:
+                    msg = f"FPP not reachable @ {cfg.host} — will use E1.31"
+                    ok  = False
+            await ws.send(json.dumps({"type": "controller_status", "ok": ok, "message": msg}))
+        except Exception as e:
+            await ws.send(json.dumps({
+                "type": "controller_status", "ok": False, "message": f"Error: {e}",
+            }))
 
     async def _run_scan(self):
         sess = self.current_session
