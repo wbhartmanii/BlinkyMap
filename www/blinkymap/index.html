@@ -41,11 +41,15 @@
   <label>FPP / Controller IP
     <input id="cfg-host" type="text" value="127.0.0.1" inputmode="decimal" />
   </label>
-  <label>Universe
-    <input id="cfg-universe" type="number" value="1" min="1" max="63999" />
+  <label>Output Mode
+    <select id="cfg-output-mode">
+      <option value="auto">Auto-detect (FPP API or E1.31)</option>
+      <option value="fpp">FPP API (multisync-aware)</option>
+      <option value="e131">E1.31 / sACN (direct)</option>
+    </select>
   </label>
-  <label>Start Channel
-    <input id="cfg-start" type="number" value="1" min="1" max="512" />
+  <label>Start Channel (absolute FPP channel)
+    <input id="cfg-start" type="number" value="1" min="1" max="999999" />
   </label>
   <label>Pixel Count
     <input id="cfg-pixels" type="number" value="100" min="1" max="2048" />

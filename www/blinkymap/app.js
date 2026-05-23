@@ -19,7 +19,7 @@ const tabBtns        = document.querySelectorAll(".tab-btn");
 const tabPanels      = document.querySelectorAll(".tab-panel");
 
 const cfgHost        = document.getElementById("cfg-host");
-const cfgUniverse    = document.getElementById("cfg-universe");
+const cfgOutputMode  = document.getElementById("cfg-output-mode");
 const cfgStart       = document.getElementById("cfg-start");
 const cfgPixels      = document.getElementById("cfg-pixels");
 const cfgDelay       = document.getElementById("cfg-delay");
@@ -198,12 +198,12 @@ async function handleServerMessage(msg) {
 // ── Config ────────────────────────────────────────────────────────────────────
 btnSaveConfig.addEventListener("click", () => {
   send({
-    type:       "set_config",
-    host:       cfgHost.value.trim(),
-    universe:   parseInt(cfgUniverse.value),
-    start_ch:   parseInt(cfgStart.value),
-    pixel_count:parseInt(cfgPixels.value),
-    delay:      parseFloat(cfgDelay.value),
+    type:        "set_config",
+    host:        cfgHost.value.trim(),
+    output_mode: cfgOutputMode.value,
+    start_ch:    parseInt(cfgStart.value),
+    pixel_count: parseInt(cfgPixels.value),
+    delay:       parseFloat(cfgDelay.value),
   });
   statusMsg("Config sent");
 });

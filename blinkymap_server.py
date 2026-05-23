@@ -67,69 +67,143 @@ log = logging.getLogger("blinkymap")
 _CID = uuid.uuid4().bytes  # stable per-process controller ID
 
 
+def _abs_to_universe(abs_ch: int) -> Tuple[int, int]:
+    """Convert 1-based absolute channel to (universe, 0-based offset)."""
+    universe = (abs_ch - 1) // 512 + 1
+    offset   = (abs_ch - 1) % 512
+    return universe, offset
+
+
 def _build_e131_packet(universe: int, channel_data: bytes) -> bytes:
     """Build a minimal E1.31 sACN UDP packet."""
     slots = len(channel_data)  # 1-512
-    seq = 0  # stateless — fine for single-pixel firing
+    seq = 0
 
-    # DMP layer
-    dmp_pdu_length = 11 + slots
-    dmp = struct.pack(
-        "!HBBHHBxx",
-        0x7000 | dmp_pdu_length,  # flags+length
-        0x02,                     # vector
-        0xA1,                     # address type
-        0x0000,                   # first property address
-        0x0001,                   # address increment
-        slots,                    # property count (low byte; high byte in xx)
-    )
-    # property count is 16-bit; repack cleanly
     dmp = (
-        struct.pack("!H", 0x7000 | dmp_pdu_length)
+        struct.pack("!H", 0x7000 | (11 + slots))
         + b"\x02\xa1"
         + struct.pack("!HHH", 0x0000, 0x0001, slots)
         + channel_data
     )
 
-    # Framing layer
     source_name = b"BlinkyMap\x00" + b"\x00" * (64 - len("BlinkyMap\x00"))
     framing_pdu_length = 77 + len(dmp)
     framing = (
         struct.pack("!H", 0x7000 | framing_pdu_length)
-        + b"\x00\x00\x00\x04"          # vector VECTOR_E131_DATA_PACKET
+        + b"\x00\x00\x00\x04"
         + source_name
         + struct.pack("!BBHB", 100, 0, universe, seq)
-        + b"\x00"                       # options
+        + b"\x00"
         + dmp
     )
 
-    # Root layer
     root_pdu_length = 22 + len(framing)
     root = (
-        b"\x00\x10"                     # preamble
-        + b"\x00\x00"                   # postamble
-        + b"ASC-E1.17\x00\x00\x00"     # ACN packet id
+        b"\x00\x10"
+        + b"\x00\x00"
+        + b"ASC-E1.17\x00\x00\x00"
         + struct.pack("!H", 0x7000 | root_pdu_length)
-        + b"\x00\x00\x00\x04"          # vector VECTOR_ROOT_E131_DATA
+        + b"\x00\x00\x00\x04"
         + _CID
         + framing
     )
     return root
 
 
-class E131Sender:
-    def __init__(self, host: str, universe: int):
-        self.host = host
-        self.universe = universe
+# ── Pixel output abstraction ──────────────────────────────────────────────────
+
+class E131Output:
+    """Fires pixels via raw E1.31/sACN UDP — works with any E1.31 receiver."""
+
+    def __init__(self, host: str, start_channel: int, pixel_count: int,
+                 color: Tuple[int, int, int]):
+        self._universe, self._offset = _abs_to_universe(start_channel)
+        self._color = color
+        self._buf_len = min(pixel_count * 3 + self._offset, 512)
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        self._host = host
 
-    def send(self, channel_data: bytes):
-        pkt = _build_e131_packet(self.universe, channel_data)
-        self._sock.sendto(pkt, (self.host, 5568))
+    def _send_raw(self, data: bytes):
+        pkt = _build_e131_packet(self._universe, data)
+        self._sock.sendto(pkt, (self._host, 5568))
+
+    def pixel_on(self, idx: int):
+        data = bytearray(self._buf_len)
+        ch = self._offset + idx * 3
+        if ch + 2 < self._buf_len:
+            data[ch], data[ch+1], data[ch+2] = self._color
+        self._send_raw(bytes(data))
+
+    def all_off(self):
+        self._send_raw(bytes(self._buf_len))
 
     def close(self):
+        self.all_off()
         self._sock.close()
+
+
+class FPPOutput:
+    """Fires pixels via FPP's HTTP command API.
+
+    Works transparently with multisync — FPP propagates Test Start/Stop to
+    all configured remotes automatically (multisyncCommand: true).
+    start_channel is the absolute FPP channel number (e.g. 9004).
+    """
+
+    def __init__(self, host: str, start_channel: int,
+                 color: Tuple[int, int, int]):
+        self._url   = f"http://{host}/api/command"
+        self._start = start_channel
+        self._color = color
+        self._sess  = requests.Session()
+
+    def pixel_on(self, idx: int):
+        r, g, b = self._color
+        ch_start = self._start + idx * 3
+        ch_end   = ch_start + 2
+        self._sess.post(self._url, json={
+            "command": "Test Start",
+            "multisyncCommand": True,
+            "multisyncHosts": "",
+            "args": ["100", "RGB Single Color",
+                     f"{ch_start}-{ch_end}", f"#{r:02x}{g:02x}{b:02x}"],
+        }, timeout=3)
+
+    def all_off(self):
+        self._sess.post(self._url, json={
+            "command": "Test Stop",
+            "multisyncCommand": True,
+            "multisyncHosts": "",
+            "args": [],
+        }, timeout=3)
+
+    def close(self):
+        self.all_off()
+        self._sess.close()
+
+
+def _is_fpp(host: str) -> bool:
+    """Return True if host is a reachable FPP instance."""
+    try:
+        r = requests.get(f"http://{host}/api/fppd/status", timeout=1.5)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def _make_output(cfg: "ControllerConfig"):
+    """Factory: auto-detect FPP or fall back to E1.31."""
+    use_fpp = (
+        cfg.output_mode == "fpp"
+        or (cfg.output_mode == "auto" and _is_fpp(cfg.host))
+    )
+    if use_fpp:
+        log.info("Output: FPP API → http://%s (abs ch %d)", cfg.host, cfg.start_channel)
+        return FPPOutput(cfg.host, cfg.start_channel, cfg.pixel_color)
+    log.info("Output: E1.31 → %s universe %d offset %d",
+             cfg.host, *_abs_to_universe(cfg.start_channel))
+    return E131Output(cfg.host, cfg.start_channel, cfg.pixel_count, cfg.pixel_color)
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -137,11 +211,11 @@ class E131Sender:
 @dataclass
 class ControllerConfig:
     host: str = "127.0.0.1"
-    universe: int = 1
-    start_channel: int = 1       # 1-based
+    start_channel: int = 1       # 1-based absolute FPP channel
     pixel_count: int = 100
     inter_pixel_delay: float = 0.15
     pixel_color: Tuple[int, int, int] = (255, 255, 255)
+    output_mode: str = "auto"    # "auto" | "fpp" | "e131"
 
 
 # ── Camera / session geometry ─────────────────────────────────────────────────
@@ -640,12 +714,12 @@ class BlinkyServer:
         t = msg.get("type")
 
         if t == "set_config":
-            self.config.host = msg.get("host", self.config.host)
-            self.config.universe = int(msg.get("universe", self.config.universe))
-            self.config.start_channel = int(msg.get("start_ch", self.config.start_channel))
-            self.config.pixel_count = int(msg.get("pixel_count", self.config.pixel_count))
+            self.config.host         = msg.get("host", self.config.host)
+            self.config.start_channel= int(msg.get("start_ch", self.config.start_channel))
+            self.config.pixel_count  = int(msg.get("pixel_count", self.config.pixel_count))
             self.config.inter_pixel_delay = float(msg.get("delay", self.config.inter_pixel_delay))
-            self.model.pixel_count = self.config.pixel_count
+            self.config.output_mode  = msg.get("output_mode", self.config.output_mode)
+            self.model.pixel_count   = self.config.pixel_count
             await ws.send(json.dumps({"type": "status", "message": "Config updated"}))
 
         elif t == "set_session":
@@ -713,31 +787,19 @@ class BlinkyServer:
 
     async def _run_scan(self):
         sess = self.current_session
-        cfg = self.config
-        sender = E131Sender(cfg.host, cfg.universe)
+        cfg  = self.config
+        output = _make_output(cfg)
 
-        total = cfg.pixel_count
-        n_channels = total * 3
-        start_ch = cfg.start_channel - 1  # 0-based offset within universe
-
+        total    = cfg.pixel_count
         detected = 0
 
         try:
             # Request background capture
             await self.broadcast({"type": "capture_background"})
-            await asyncio.sleep(0.5)   # give browser time to grab background
+            await asyncio.sleep(0.5)
 
             for idx in range(total):
-                # Build channel data: all off except this pixel
-                data = bytearray(min(n_channels + start_ch, 512))
-                ch = start_ch + idx * 3
-                if ch + 2 < len(data):
-                    r, g, b = cfg.pixel_color
-                    data[ch] = r
-                    data[ch + 1] = g
-                    data[ch + 2] = b
-
-                sender.send(bytes(data))
+                output.pixel_on(idx)
                 await self.broadcast({"type": "pixel_on", "index": idx})
 
                 # Wait for browser detection response (or timeout)
@@ -755,13 +817,10 @@ class BlinkyServer:
                         self.model.record_detection(sess.session_id, idx, det)
                         detected += 1
 
-                # Turn pixel off
-                sender.send(bytes(min(n_channels + start_ch, 512)))
+                output.all_off()
                 await self.broadcast({"type": "pixel_off"})
-
                 await self.broadcast({"type": "progress", "index": idx, "total": total})
-
-                await asyncio.sleep(0.02)  # small gap between pixels
+                await asyncio.sleep(0.02)
 
             await self.broadcast({
                 "type": "scan_complete",
@@ -789,11 +848,10 @@ class BlinkyServer:
             })
 
         except asyncio.CancelledError:
-            # Turn all pixels off
-            sender.send(bytes(512))
+            output.all_off()
             log.info("Scan cancelled")
         finally:
-            sender.close()
+            output.close()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
