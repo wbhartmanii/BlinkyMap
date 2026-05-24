@@ -40,6 +40,21 @@ html, body {
 }
 .header-logo { font-size: 1.1rem; font-weight: 700; letter-spacing: .5px; }
 
+#unit-toggle {
+  display: flex; gap: 2px;
+  background: var(--surface2);
+  border-radius: 8px;
+  padding: 3px;
+  margin-right: 8px;
+}
+.unit-btn {
+  background: none; border: none; cursor: pointer;
+  color: var(--muted); font-size: .75rem; font-weight: 700;
+  padding: 3px 9px; border-radius: 5px;
+  transition: background .15s, color .15s;
+}
+.unit-btn.active { background: var(--accent2); color: #fff; }
+
 .dot {
   width: 12px; height: 12px;
   border-radius: 50%;
@@ -232,7 +247,9 @@ input[type="range"]::-moz-range-thumb {
   display: flex; align-items: center; gap: 8px;
   cursor: pointer; user-select: none;
 }
-.session-card-header > span:first-child { flex: 1; }
+.sess-title { flex: 1; }
+.sess-name  { font-size: .85rem; font-weight: 600; }
+.sess-pos   { font-size: .72rem; color: var(--muted); margin-top: 1px; }
 .sess-chevron {
   font-size: .65rem; color: var(--muted);
   transition: transform .2s;
@@ -301,6 +318,13 @@ input[type="range"]::-moz-range-thumb {
   color: var(--text);
 }
 #confidence-detail { font-size: .8rem; color: var(--muted); }
+#confidence-tip {
+  font-size: .78rem; color: var(--muted); line-height: 1.4;
+  background: #ffffff08; border-radius: 6px;
+  padding: 7px 10px; margin-top: 10px;
+  text-align: left;
+}
+#confidence-tip:empty { display: none; }
 
 /* ── 3D viewer ── */
 #viewer-container {

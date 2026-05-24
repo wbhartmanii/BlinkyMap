@@ -953,6 +953,9 @@ class BlinkyServer:
                 "detected": detected,
                 "total": total,
                 "detections": detections_out,
+                "angle": sess.angle_deg,
+                "distance": sess.distance_m,
+                "height": sess.height_m,
             })
 
             # Triangulate and broadcast model

@@ -62,6 +62,8 @@ const pixelListEl    = document.getElementById("pixel-list");
 const exportConfLabel= document.getElementById("export-confidence-label");
 const btnExportXmodel= document.getElementById("btn-export-xmodel");
 const btnExportCsv   = document.getElementById("btn-export-csv");
+const unitToggle     = document.getElementById("unit-toggle");
+const confidenceTip  = document.getElementById("confidence-tip");
 
 // ── App state ─────────────────────────────────────────────────────────────────
 let ws           = null;
@@ -70,10 +72,21 @@ let bgImageData  = null;
 let camWidth     = 1280;
 let camHeight    = 720;
 let scanning     = false;
-let currentPixelIdx = -1;   // pixel the server is currently firing
-let sessions        = [];    // [{id, angle, detected, total}]
-let latestPixels    = [];    // last model from server
-let lastSuggestion  = null;  // last next_suggestion payload
+let currentPixelIdx = -1;
+let sessions        = [];
+let latestPixels    = [];
+let lastSuggestion  = null;
+let units           = "m";   // "m" or "ft"
+
+// ── Unit helpers ──────────────────────────────────────────────────────────────
+function formatDist(meters) {
+  return units === "ft"
+    ? `${(meters * 3.28084).toFixed(1)} ft`
+    : `${meters.toFixed(1)} m`;
+}
+function toMeters(val) {
+  return units === "ft" ? val / 3.28084 : val;
+}
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
 tabBtns.forEach(btn => {
@@ -183,7 +196,8 @@ async function handleServerMessage(msg) {
     case "scan_complete":
       scanning = false;
       scanBlock.style.display = "none";
-      addSessionCard(msg.session, msg.detected, msg.total, msg.detections || {});
+      addSessionCard(msg.session, msg.detected, msg.total, msg.detections || {},
+                     msg.angle ?? 0, msg.distance ?? 2, msg.height ?? 1.5);
       statusMsg(`Session ${msg.session}: ${msg.detected}/${msg.total} detected`);
       if (camPreview.srcObject) {
         camStatusBar.textContent = `Camera active — ${msg.detected}/${msg.total} pixels detected last session`;
@@ -281,6 +295,40 @@ cfgMinConf.addEventListener("input", () => {
   cfgMinConfVal.textContent = `${cfgMinConf.value}%`;
 });
 
+// ── Unit toggle ───────────────────────────────────────────────────────────────
+unitToggle.addEventListener("click", e => {
+  const btn = e.target.closest(".unit-btn");
+  if (!btn || btn.dataset.unit === units) return;
+  const prev = units;
+  units = btn.dataset.unit;
+
+  // Update button styles
+  unitToggle.querySelectorAll(".unit-btn").forEach(b =>
+    b.classList.toggle("active", b.dataset.unit === units));
+
+  // Update label suffixes
+  document.querySelectorAll(".unit-sfx").forEach(el => el.textContent = units);
+
+  // Convert distance/height input values
+  const factor = units === "ft" ? 3.28084 : 1 / 3.28084;
+  for (const el of [sessDist, sessHeight]) {
+    const v = parseFloat(el.value);
+    if (!isNaN(v)) el.value = (v * factor).toFixed(2);
+  }
+
+  // Update existing session card positions
+  document.querySelectorAll(".session-card[data-dist-m]").forEach(card => {
+    card.querySelector(".sess-pos").textContent = sessionPosStr(
+      parseFloat(card.dataset.angle),
+      parseFloat(card.dataset.distM),
+      parseFloat(card.dataset.heightM),
+    );
+  });
+
+  // Update suggestion card if showing
+  if (lastSuggestion) showSuggestion(lastSuggestion);
+});
+
 // ── Camera ────────────────────────────────────────────────────────────────────
 btnOpenCamera.addEventListener("click", async () => {
   try {
@@ -306,9 +354,9 @@ btnOpenCamera.addEventListener("click", async () => {
 btnStartSess.addEventListener("click", () => {
   if (scanning) { alert("Scan already running"); return; }
 
-  const angle    = parseFloat(sessAngle.value)  || 0;
-  const distance = parseFloat(sessDist.value)   || 2.0;
-  const height   = parseFloat(sessHeight.value) || 1.5;
+  const angle    = parseFloat(sessAngle.value) || 0;
+  const distance = toMeters(parseFloat(sessDist.value)   || (units === "ft" ? 6.56 : 2.0));
+  const height   = toMeters(parseFloat(sessHeight.value) || (units === "ft" ? 4.92 : 1.5));
 
   send({
     type:     "set_session",
@@ -343,12 +391,15 @@ function updateProgress(done, total) {
   progressLabel.textContent = `${done} / ${total}`;
 }
 
-function addSessionCard(sessionId, detected, total, detections) {
-  sessions.push({ id: sessionId, detected, total, detections });
+function sessionPosStr(angle, distM, heightM) {
+  return `${Math.round(angle)}° · ${formatDist(distM)} away · ${formatDist(heightM)} high`;
+}
+
+function addSessionCard(sessionId, detected, total, detections, angleDeg, distM, heightM) {
+  sessions.push({ id: sessionId, detected, total, detections, angleDeg, distM, heightM });
   const pct = total > 0 ? Math.round((detected / total) * 100) : 0;
   const badge = pct >= 70 ? "badge-good" : pct >= 40 ? "badge-medium" : "badge-poor";
 
-  // Build pixel rows: all pixels, seen then unseen
   let rows = "";
   for (let i = 0; i < total; i++) {
     const d = detections[i];
@@ -372,9 +423,15 @@ function addSessionCard(sessionId, detected, total, detections) {
   const card = document.createElement("div");
   card.className = "session-card";
   card.dataset.sessionId = sessionId;
+  card.dataset.angle     = angleDeg;
+  card.dataset.distM     = distM;
+  card.dataset.heightM   = heightM;
   card.innerHTML = `
     <div class="session-card-header">
-      <span>Session ${sessionId}</span>
+      <div class="sess-title">
+        <div class="sess-name">Session ${sessionId}</div>
+        <div class="sess-pos">${sessionPosStr(angleDeg, distM, heightM)}</div>
+      </div>
       <span class="badge ${badge}">${detected}/${total} (${pct}%)</span>
       <span class="sess-chevron">▸</span>
       <button class="session-delete" title="Delete this session">&#x2715;</button>
@@ -400,7 +457,7 @@ function addSessionCard(sessionId, detected, total, detections) {
 function showSuggestion(msg) {
   const angle = msg.angle ?? 0;
   suggAngle.textContent  = `${angle}°`;
-  suggDist.textContent   = `${msg.distance ?? 2}m from trunk · same height`;
+  suggDist.textContent   = `${formatDist(msg.distance ?? 2)} from center · same height`;
   suggReason.textContent = msg.reason ?? "";
   suggCard.style.display = "block";
 }
@@ -425,6 +482,22 @@ function updateConfidence(msg) {
   confidenceDet.textContent =
     `Coverage ${Math.round((msg.coverage ?? 0)*100)}% · ` +
     `High ${msg.high ?? 0} · Med ${msg.medium ?? 0} · Low ${msg.low ?? 0} · Unseen ${msg.unseen ?? 0}`;
+
+  // Contextual tip
+  const nSess = sessions.length;
+  let tip;
+  if (nSess === 0) {
+    tip = "Complete your first scan to start building the model.";
+  } else if (nSess === 1) {
+    tip = "Scan from a second angle (~180° away) to enable 3D triangulation — positions can't be calculated from one view alone.";
+  } else if (pct < 20) {
+    tip = `Only ${msg.high + msg.medium} pixels triangulated so far. Try more angles or lower the detection confidence threshold.`;
+  } else if ((msg.unseen ?? 0) > (msg.high + msg.medium + msg.low)) {
+    tip = `${msg.unseen} pixels still unseen — scan from more angles to find them.`;
+  } else {
+    tip = `${msg.high} high-confidence · ${msg.medium} medium · ${msg.low} low · ${msg.unseen} unseen. Add more angles to improve accuracy.`;
+  }
+  confidenceTip.textContent = tip;
 
   // Update export tab label
   exportConfLabel.textContent = `Model confidence: ${pct}% (${msg.grade})`;
