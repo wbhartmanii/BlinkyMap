@@ -153,7 +153,7 @@ async function handleServerMessage(msg) {
         const result = detectLED(camPreview, camCanvas, bgImageData, 25);
         // Draw amplified diff so user can see what the camera sees
         drawDiff(camCanvas, bgImageData, msg.index, result);
-        if (result.found) {
+        if (result.found && result.conf >= 0.5) {
           send({
             type: "detection",
             index: msg.index,
