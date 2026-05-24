@@ -2,7 +2,7 @@
   "repoName": "blinkymap",
   "name": "BlinkyMap",
   "author": "BlinkyMap Contributors",
-  "description": "Automatically build a 3D xLights model for a pixel-wrapped tree by triangulating pixel positions from a phone camera moved to multiple spots.",
+  "description": "Automatically build a 3D xLights model for any pixel-wrapped prop (trees, arches, megatrees) by triangulating pixel positions from a phone camera moved to multiple scan positions.",
   "homeURL": "https://github.com/wbhartmanii/BlinkyMap",
   "srcURL": "https://github.com/wbhartmanii/BlinkyMap.git",
   "bugURL": "https://github.com/wbhartmanii/BlinkyMap/issues",
