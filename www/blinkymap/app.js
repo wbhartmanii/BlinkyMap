@@ -150,7 +150,7 @@ async function handleServerMessage(msg) {
       currentPixelIdx = msg.index;
       if (bgImageData && camPreview.srcObject) {
         await sleep(80);
-        const result = detectLED(camPreview, camCanvas, bgImageData, 10);
+        const result = detectLED(camPreview, camCanvas, bgImageData, 25);
         // Draw amplified diff so user can see what the camera sees
         drawDiff(camCanvas, bgImageData, msg.index, result);
         if (result.found) {

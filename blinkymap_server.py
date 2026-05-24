@@ -882,15 +882,11 @@ class BlinkyServer:
 
         try:
             # Drain any stale queue entries from a previous scan
-            drained = 0
             while not self._detection_queue.empty():
                 try:
                     self._detection_queue.get_nowait()
-                    drained += 1
                 except asyncio.QueueEmpty:
                     break
-            if drained:
-                log.info("_run_scan: drained %d stale queue entries", drained)
 
             # Request background capture
             await self.broadcast({"type": "capture_background"})
@@ -902,26 +898,20 @@ class BlinkyServer:
                 await asyncio.sleep(cfg.inter_pixel_delay)
                 await self.broadcast({"type": "pixel_on", "index": idx})
 
-                # Drain any late-arriving responses from the previous pixel
-                drained = 0
+                # Drain any stale detections from the previous pixel
                 while not self._detection_queue.empty():
                     try:
                         self._detection_queue.get_nowait()
-                        drained += 1
                     except asyncio.QueueEmpty:
                         break
-                if drained:
-                    log.info("Scan pixel %d: drained %d stale item(s) before waiting", idx, drained)
 
-                # Wait for browser detection — no_detection is not queued, so
-                # only positive detections arrive; timeout = not detected.
-                log.info("Scan pixel %d: waiting (queue size=%d)", idx, self._detection_queue.qsize())
+                # Wait for browser detection — only positive detections are queued;
+                # no_detection is not queued so the timeout handles missed pixels.
                 try:
                     _, det_idx, det = await asyncio.wait_for(
                         self._detection_queue.get(),
                         timeout=0.5,
                     )
-                    log.info("Scan pixel %d: got detection det_idx=%d", idx, det_idx)
                     if det_idx == idx:
                         self.model.record_detection(sess.session_id, idx, det)
                         detected += 1
@@ -929,7 +919,7 @@ class BlinkyServer:
                     else:
                         log.warning("Scan pixel %d: stale detection for pixel %d", idx, det_idx)
                 except asyncio.TimeoutError:
-                    log.info("Scan pixel %d: not detected (timeout)", idx)
+                    log.debug("Scan pixel %d: not detected (timeout)", idx)
                 except Exception as e:
                     log.error("Scan pixel %d: unexpected error: %s", idx, e, exc_info=True)
 
