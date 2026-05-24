@@ -769,10 +769,12 @@ class BlinkyServer:
             )
             self._last_detection = (idx, det)
             self._detection_event.set()
+            log.info("Detection received: pixel %d conf=%.2f", idx, det.conf)
 
         elif t == "no_detection":
             self._last_detection = None
             self._detection_event.set()
+            log.debug("No-detection received: pixel %d", msg.get("index", -1))
 
         elif t == "test_sweep":
             if self.test_task and not self.test_task.done():
@@ -897,13 +899,18 @@ class BlinkyServer:
                     await asyncio.wait_for(self._detection_event.wait(),
                                            timeout=cfg.inter_pixel_delay + 2.0)
                 except asyncio.TimeoutError:
-                    pass
+                    log.warning("Scan pixel %d: timed out waiting for browser", idx)
 
                 if self._last_detection is not None:
                     det_idx, det = self._last_detection
                     if det_idx == idx:
                         self.model.record_detection(sess.session_id, idx, det)
                         detected += 1
+                        log.info("Scan pixel %d: COUNTED conf=%.2f", idx, det.conf)
+                    else:
+                        log.warning("Scan pixel %d: index mismatch got=%d", idx, det_idx)
+                else:
+                    log.debug("Scan pixel %d: no detection (timeout or no_detection)", idx)
 
                 await self.broadcast({"type": "pixel_off"})
                 await self.broadcast({"type": "progress", "index": idx, "total": total})
