@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>BlinkyMap</title>
-  <link rel="stylesheet" href="style.css?v=3" />
+  <link rel="stylesheet" href="style.css?v=4" />
 
   <!-- Import map for Three.js (served locally after install.sh) -->
   <script type="importmap">
@@ -67,7 +67,7 @@
   <label>Horizontal FOV (°)
     <input id="cfg-fov" type="number" value="60" min="20" max="170" step="1" />
   </label>
-  <button class="btn-secondary wide" id="btn-open-camera">Open Phone Camera</button>
+  <button class="btn-secondary wide" id="btn-open-camera">Open Camera</button>
   <video id="cam-preview" autoplay playsinline muted></video>
   <canvas id="cam-canvas" style="display:none"></canvas>
 </section>
@@ -86,6 +86,9 @@
   <label>Camera height (m)
     <input id="sess-height" type="number" value="1.5" min="0.2" max="10" step="0.1" />
   </label>
+  <div id="cam-status-bar" class="cam-status cam-status-off">
+    Camera: not open &mdash; open in Setup tab before scanning
+  </div>
   <button class="btn-primary wide" id="btn-start-session">Start Session</button>
 
   <div id="scan-progress-block" style="display:none">
@@ -149,6 +152,6 @@
   </ol>
 </section>
 
-<script type="module" src="app.js?v=3"></script>
+<script type="module" src="app.js?v=4"></script>
 </body>
 </html>

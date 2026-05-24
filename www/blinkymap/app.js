@@ -30,6 +30,7 @@ const btnTestBlink       = document.getElementById("btn-test-blink");
 const btnStopTest    = document.getElementById("btn-stop-test");
 const testResultMsg  = document.getElementById("test-result-msg");
 const btnOpenCamera  = document.getElementById("btn-open-camera");
+const camStatusBar   = document.getElementById("cam-status-bar");
 const camPreview     = document.getElementById("cam-preview");
 const camCanvas      = document.getElementById("cam-canvas");
 
@@ -134,7 +135,12 @@ async function handleServerMessage(msg) {
     case "capture_background":
       if (camPreview.srcObject) {
         bgImageData = captureBackground(camPreview, camCanvas);
+        camStatusBar.textContent = "Camera: background captured — scanning…";
+        camStatusBar.className   = "cam-status cam-status-bg";
         statusMsg("Background captured");
+      } else {
+        camStatusBar.textContent = "Camera: not open — detections will be skipped";
+        camStatusBar.className   = "cam-status cam-status-off";
       }
       break;
 
@@ -143,7 +149,7 @@ async function handleServerMessage(msg) {
       if (bgImageData && camPreview.srcObject) {
         // Small settle delay then detect
         await sleep(80);
-        const result = detectLED(camPreview, camCanvas, bgImageData);
+        const result = detectLED(camPreview, camCanvas, bgImageData, 20);
         if (result.found) {
           send({
             type: "detection",
@@ -174,6 +180,10 @@ async function handleServerMessage(msg) {
       scanBlock.style.display = "none";
       addSessionCard(msg.session, msg.detected, msg.total);
       statusMsg(`Session ${msg.session}: ${msg.detected}/${msg.total} detected`);
+      if (camPreview.srcObject) {
+        camStatusBar.textContent = `Camera active — ${msg.detected}/${msg.total} pixels detected last session`;
+        camStatusBar.className   = "cam-status " + (msg.detected > 0 ? "cam-status-on" : "cam-status-off");
+      }
       break;
 
     case "model":
@@ -263,6 +273,8 @@ btnOpenCamera.addEventListener("click", async () => {
     camWidth  = dim.width;
     camHeight = dim.height;
     camPreview.style.display = "block";
+    camStatusBar.textContent = `Camera active (${camWidth}×${camHeight}) — ready to scan`;
+    camStatusBar.className   = "cam-status cam-status-on";
     send({
       type:     "set_fov",
       hfov_deg: parseFloat(cfgFov.value),
