@@ -156,13 +156,13 @@ async function handleServerMessage(msg) {
         if (result.found) {
           send({
             type: "detection",
-            index: currentPixelIdx,
+            index: msg.index,
             cx:   result.cx,
             cy:   result.cy,
             conf: result.conf,
           });
         } else {
-          send({ type: "no_detection", index: currentPixelIdx });
+          send({ type: "no_detection", index: msg.index });
         }
       } else {
         send({ type: "no_detection", index: msg.index });
