@@ -942,11 +942,17 @@ class BlinkyServer:
             log.info("_run_scan: DONE detected=%d/%d", detected, total)
 
             await loop.run_in_executor(None, output.all_off)
+            _, det_dict = self.model.sessions[sess.session_id]
+            detections_out = {
+                idx: {"cx": round(d.cx, 1), "cy": round(d.cy, 1), "conf": round(d.conf, 3)}
+                for idx, d in det_dict.items()
+            }
             await self.broadcast({
                 "type": "scan_complete",
                 "session": sess.session_id,
                 "detected": detected,
                 "total": total,
+                "detections": detections_out,
             })
 
             # Triangulate and broadcast model

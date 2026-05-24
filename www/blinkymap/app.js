@@ -183,7 +183,7 @@ async function handleServerMessage(msg) {
     case "scan_complete":
       scanning = false;
       scanBlock.style.display = "none";
-      addSessionCard(msg.session, msg.detected, msg.total);
+      addSessionCard(msg.session, msg.detected, msg.total, msg.detections || {});
       statusMsg(`Session ${msg.session}: ${msg.detected}/${msg.total} detected`);
       if (camPreview.srcObject) {
         camStatusBar.textContent = `Camera active — ${msg.detected}/${msg.total} pixels detected last session`;
@@ -343,18 +343,54 @@ function updateProgress(done, total) {
   progressLabel.textContent = `${done} / ${total}`;
 }
 
-function addSessionCard(sessionId, detected, total) {
-  sessions.push({ id: sessionId, detected, total });
+function addSessionCard(sessionId, detected, total, detections) {
+  sessions.push({ id: sessionId, detected, total, detections });
   const pct = total > 0 ? Math.round((detected / total) * 100) : 0;
   const badge = pct >= 70 ? "badge-good" : pct >= 40 ? "badge-medium" : "badge-poor";
+
+  // Build pixel rows: all pixels, seen then unseen
+  let rows = "";
+  for (let i = 0; i < total; i++) {
+    const d = detections[i];
+    if (d) {
+      rows += `<div class="sess-row sess-row-seen">
+        <span>${i + 1}</span>
+        <span class="sess-seen-yes">✓</span>
+        <span>${Math.round(d.conf * 100)}%</span>
+        <span>${Math.round(d.cx)}</span>
+        <span>${Math.round(d.cy)}</span>
+      </div>`;
+    } else {
+      rows += `<div class="sess-row sess-row-unseen">
+        <span>${i + 1}</span>
+        <span class="sess-seen-no">–</span>
+        <span>–</span><span>–</span><span>–</span>
+      </div>`;
+    }
+  }
+
   const card = document.createElement("div");
   card.className = "session-card";
   card.dataset.sessionId = sessionId;
   card.innerHTML = `
-    <span>Session ${sessionId}</span>
-    <span class="badge ${badge}">${detected}/${total} (${pct}%)</span>
-    <button class="session-delete" title="Delete this session">&#x2715;</button>
+    <div class="session-card-header">
+      <span>Session ${sessionId}</span>
+      <span class="badge ${badge}">${detected}/${total} (${pct}%)</span>
+      <span class="sess-chevron">▸</span>
+      <button class="session-delete" title="Delete this session">&#x2715;</button>
+    </div>
+    <div class="session-detail">
+      <div class="sess-col-header">
+        <span>Ch#</span><span>Seen</span><span>Conf</span><span>ImgX</span><span>ImgY</span>
+      </div>
+      <div class="sess-pixel-list">${rows}</div>
+    </div>
   `;
+
+  card.querySelector(".session-card-header").addEventListener("click", e => {
+    if (e.target.closest(".session-delete")) return;
+    card.classList.toggle("expanded");
+  });
   card.querySelector(".session-delete").addEventListener("click", () => {
     send({ type: "delete_session", session_id: sessionId });
   });
