@@ -874,6 +874,8 @@ class BlinkyServer:
         sess = self.current_session
         cfg  = self.config
         loop = asyncio.get_running_loop()
+        log.info("_run_scan: START session=%d pixels=%d delay=%.2f",
+                 sess.session_id, cfg.pixel_count, cfg.inter_pixel_delay)
         output = await loop.run_in_executor(None, lambda: _make_output(cfg))
 
         total    = cfg.pixel_count
@@ -881,11 +883,15 @@ class BlinkyServer:
 
         try:
             # Drain any stale queue entries from a previous scan
+            drained = 0
             while not self._detection_queue.empty():
                 try:
                     self._detection_queue.get_nowait()
+                    drained += 1
                 except asyncio.QueueEmpty:
                     break
+            if drained:
+                log.info("_run_scan: drained %d stale queue entries", drained)
 
             # Request background capture
             await self.broadcast({"type": "capture_background"})
@@ -898,19 +904,24 @@ class BlinkyServer:
                 await self.broadcast({"type": "pixel_on", "index": idx})
 
                 # Drain any late-arriving responses from the previous pixel
+                drained = 0
                 while not self._detection_queue.empty():
                     try:
                         self._detection_queue.get_nowait()
+                        drained += 1
                     except asyncio.QueueEmpty:
                         break
+                if drained:
+                    log.info("Scan pixel %d: drained %d stale item(s) before waiting", idx, drained)
 
                 # Wait for browser detection response (or timeout)
+                log.info("Scan pixel %d: waiting (queue size=%d)", idx, self._detection_queue.qsize())
                 try:
                     kind, det_idx, det = await asyncio.wait_for(
                         self._detection_queue.get(),
                         timeout=cfg.inter_pixel_delay + 2.0,
                     )
-                    log.debug("Scan pixel %d: response kind=%s det_idx=%d", idx, kind, det_idx)
+                    log.info("Scan pixel %d: got kind=%s det_idx=%d", idx, kind, det_idx)
                     if kind == "detection":
                         if det_idx == idx:
                             self.model.record_detection(sess.session_id, idx, det)
@@ -919,15 +930,17 @@ class BlinkyServer:
                         else:
                             log.warning("Scan pixel %d: index mismatch got=%d", idx, det_idx)
                     else:
-                        log.debug("Scan pixel %d: no detection", idx)
+                        log.info("Scan pixel %d: no_detection received", idx)
                 except asyncio.TimeoutError:
                     log.warning("Scan pixel %d: timed out waiting for browser", idx)
                 except Exception as e:
-                    log.error("Scan pixel %d: unexpected error: %s", idx, e)
+                    log.error("Scan pixel %d: unexpected error: %s", idx, e, exc_info=True)
 
                 await self.broadcast({"type": "pixel_off"})
                 await self.broadcast({"type": "progress", "index": idx, "total": total})
                 await asyncio.sleep(0.02)
+
+            log.info("_run_scan: DONE detected=%d/%d", detected, total)
 
             await loop.run_in_executor(None, output.all_off)
             await self.broadcast({
