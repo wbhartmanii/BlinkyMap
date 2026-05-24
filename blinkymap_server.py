@@ -782,6 +782,18 @@ class BlinkyServer:
             if self.test_task:
                 self.test_task.cancel()
 
+        elif t == "delete_session":
+            sid = int(msg.get("session_id", -1))
+            if sid in self.model.sessions:
+                del self.model.sessions[sid]
+                self.model.triangulate()
+                await self.broadcast({"type": "session_deleted", "session_id": sid})
+                await self.broadcast({"type": "model", "pixels": self.model.to_json_pixels()})
+                await self.broadcast({"type": "confidence", **self.model.model_confidence()})
+                suggestion = suggest_next_angle(self.model, self.model.sessions)
+                await self.broadcast({"type": "next_suggestion", **suggestion})
+                log.info("Session %d deleted (%d remaining)", sid, len(self.model.sessions))
+
         elif t == "stop_scan":
             if self.scan_task:
                 self.scan_task.cancel()

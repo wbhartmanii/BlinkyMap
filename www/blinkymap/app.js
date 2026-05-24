@@ -207,6 +207,11 @@ async function handleServerMessage(msg) {
       if (viewer) viewer.setSuggestion(msg.angle, msg.distance);
       break;
 
+    case "session_deleted":
+      sessions = sessions.filter(s => s.id !== msg.session_id);
+      sessionList.querySelector(`[data-session-id="${msg.session_id}"]`)?.remove();
+      break;
+
     case "controller_status":
       controllerStatus.textContent = msg.message;
       controllerStatus.className   = `controller-status ${msg.ok ? "ctrl-ok" : "ctrl-fail"}`;
@@ -344,10 +349,15 @@ function addSessionCard(sessionId, detected, total) {
   const badge = pct >= 70 ? "badge-good" : pct >= 40 ? "badge-medium" : "badge-poor";
   const card = document.createElement("div");
   card.className = "session-card";
+  card.dataset.sessionId = sessionId;
   card.innerHTML = `
     <span>Session ${sessionId}</span>
     <span class="badge ${badge}">${detected}/${total} (${pct}%)</span>
+    <button class="session-delete" title="Delete this session">&#x2715;</button>
   `;
+  card.querySelector(".session-delete").addEventListener("click", () => {
+    send({ type: "delete_session", session_id: sessionId });
+  });
   sessionList.appendChild(card);
 }
 
