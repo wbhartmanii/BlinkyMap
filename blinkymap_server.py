@@ -886,6 +886,8 @@ class BlinkyServer:
 
             for idx in range(total):
                 await loop.run_in_executor(None, lambda i=idx: output.pixel_on(i))
+                # Allow FPP multisync to propagate to remotes before browser captures
+                await asyncio.sleep(cfg.inter_pixel_delay)
                 await self.broadcast({"type": "pixel_on", "index": idx})
 
                 # Wait for browser detection response (or timeout)
