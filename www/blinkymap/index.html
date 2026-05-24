@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>BlinkyMap</title>
-  <link rel="stylesheet" href="style.css?v=4" />
+  <link rel="stylesheet" href="style.css?v=5" />
 
   <!-- Import map for Three.js (served locally after install.sh) -->
   <script type="importmap">
@@ -96,6 +96,10 @@
       <div id="scan-progress-bar" class="progress-bar"></div>
     </div>
     <p id="scan-progress-label">0 / 0</p>
+    <div id="scan-debug">
+      <canvas id="diff-canvas"></canvas>
+      <div id="diff-label">diff view</div>
+    </div>
     <button class="btn-danger wide" id="btn-stop-scan">Stop Scan</button>
   </div>
 
@@ -152,6 +156,6 @@
   </ol>
 </section>
 
-<script type="module" src="app.js?v=4"></script>
+<script type="module" src="app.js?v=5"></script>
 </body>
 </html>

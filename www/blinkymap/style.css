@@ -132,6 +132,23 @@ input:focus { border-color: var(--accent); }
 .test-ok   { background: #1a3320; color: var(--green); border: 1px solid #69f0ae44; }
 .test-fail { background: #3a1010; color: var(--red);   border: 1px solid #ef535044; }
 
+/* ── Scan diff debug view ── */
+#scan-debug {
+  margin: 8px 0;
+  text-align: center;
+}
+#diff-canvas {
+  width: 100%; max-width: 320px;
+  border-radius: var(--radius);
+  background: #000;
+  display: block;
+  margin: 0 auto;
+}
+#diff-label {
+  font-size: .75rem; color: var(--muted);
+  margin-top: 4px;
+}
+
 /* ── Camera status bar (Scan tab) ── */
 .cam-status {
   font-size: .82rem; padding: 7px 12px;

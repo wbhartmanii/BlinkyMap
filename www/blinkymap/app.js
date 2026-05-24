@@ -52,6 +52,8 @@ const confidencePct  = document.getElementById("confidence-pct");
 const confidenceGrade= document.getElementById("confidence-grade");
 const confidenceDet  = document.getElementById("confidence-detail");
 
+const diffCanvas     = document.getElementById("diff-canvas");
+const diffLabel      = document.getElementById("diff-label");
 const viewerContainer= document.getElementById("viewer-container");
 const pixelListEl    = document.getElementById("pixel-list");
 
@@ -147,9 +149,10 @@ async function handleServerMessage(msg) {
     case "pixel_on":
       currentPixelIdx = msg.index;
       if (bgImageData && camPreview.srcObject) {
-        // Small settle delay then detect
         await sleep(80);
-        const result = detectLED(camPreview, camCanvas, bgImageData, 20);
+        const result = detectLED(camPreview, camCanvas, bgImageData, 10);
+        // Draw amplified diff so user can see what the camera sees
+        drawDiff(camCanvas, bgImageData, msg.index, result);
         if (result.found) {
           send({
             type: "detection",
@@ -162,7 +165,6 @@ async function handleServerMessage(msg) {
           send({ type: "no_detection", index: currentPixelIdx });
         }
       } else {
-        // No camera — just acknowledge so scan doesn't stall
         send({ type: "no_detection", index: msg.index });
       }
       break;
@@ -414,6 +416,67 @@ function triggerDownload(filename, content, mime) {
 
 // ── Utility ───────────────────────────────────────────────────────────────────
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function drawDiff(srcCanvas, bgImageData, pixelIdx, result) {
+  const W = srcCanvas.width;
+  const H = srcCanvas.height;
+  if (!W || !H) return;
+
+  const srcCtx  = srcCanvas.getContext("2d", { willReadFrequently: true });
+  const litData = srcCtx.getImageData(0, 0, W, H);
+  const bg      = bgImageData.data;
+  const lit     = litData.data;
+
+  // Scale down 4× for the preview canvas
+  const scale  = 4;
+  const dW     = Math.floor(W / scale);
+  const dH     = Math.floor(H / scale);
+  diffCanvas.width  = dW;
+  diffCanvas.height = dH;
+
+  const dCtx  = diffCanvas.getContext("2d");
+  const imgD  = dCtx.createImageData(dW, dH);
+  const d     = imgD.data;
+
+  let peakLum = 0;
+  for (let dy = 0; dy < dH; dy++) {
+    for (let dx = 0; dx < dW; dx++) {
+      const sx = dx * scale;
+      const sy = dy * scale;
+      const si = (sy * W + sx) * 4;
+      const di = (dy * dW + dx) * 4;
+      const dr = Math.max(0, lit[si]   - bg[si]);
+      const dg = Math.max(0, lit[si+1] - bg[si+1]);
+      const db = Math.max(0, lit[si+2] - bg[si+2]);
+      const lum = 0.299 * dr + 0.587 * dg + 0.114 * db;
+      if (lum > peakLum) peakLum = lum;
+      // Amplify 4× so faint signals are visible
+      d[di]   = Math.min(255, dr * 4);
+      d[di+1] = Math.min(255, dg * 4);
+      d[di+2] = Math.min(255, db * 4);
+      d[di+3] = 255;
+    }
+  }
+  dCtx.putImageData(imgD, 0, 0);
+
+  // Draw crosshair if detected
+  if (result.found) {
+    dCtx.strokeStyle = "#69f0ae";
+    dCtx.lineWidth   = 1;
+    const cx = result.cx / scale;
+    const cy = result.cy / scale;
+    dCtx.beginPath();
+    dCtx.moveTo(cx - 8, cy); dCtx.lineTo(cx + 8, cy);
+    dCtx.moveTo(cx, cy - 8); dCtx.lineTo(cx, cy + 8);
+    dCtx.stroke();
+  }
+
+  const status = result.found
+    ? `Pixel ${pixelIdx + 1}: detected  conf=${(result.conf * 100).toFixed(0)}%  peak=${peakLum.toFixed(0)}`
+    : `Pixel ${pixelIdx + 1}: not found  peak=${peakLum.toFixed(0)}`;
+  diffLabel.textContent = status;
+  console.log("[BlinkyMap]", status);
+}
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 connect();
