@@ -873,7 +873,8 @@ class BlinkyServer:
     async def _run_scan(self):
         sess = self.current_session
         cfg  = self.config
-        output = _make_output(cfg)
+        loop = asyncio.get_running_loop()
+        output = await loop.run_in_executor(None, lambda: _make_output(cfg))
 
         total    = cfg.pixel_count
         detected = 0
@@ -884,7 +885,7 @@ class BlinkyServer:
             await asyncio.sleep(0.5)
 
             for idx in range(total):
-                output.pixel_on(idx)
+                await loop.run_in_executor(None, lambda i=idx: output.pixel_on(i))
                 await self.broadcast({"type": "pixel_on", "index": idx})
 
                 # Wait for browser detection response (or timeout)
@@ -906,7 +907,7 @@ class BlinkyServer:
                 await self.broadcast({"type": "progress", "index": idx, "total": total})
                 await asyncio.sleep(0.02)
 
-            output.all_off()
+            await loop.run_in_executor(None, output.all_off)
             await self.broadcast({
                 "type": "scan_complete",
                 "session": sess.session_id,
@@ -933,10 +934,10 @@ class BlinkyServer:
             })
 
         except asyncio.CancelledError:
-            output.all_off()
+            await loop.run_in_executor(None, output.all_off)
             log.info("Scan cancelled")
         finally:
-            output.close()
+            await loop.run_in_executor(None, output.close)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
