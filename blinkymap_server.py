@@ -49,6 +49,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
+import requests
 
 try:
     import websockets
@@ -67,69 +68,143 @@ log = logging.getLogger("blinkymap")
 _CID = uuid.uuid4().bytes  # stable per-process controller ID
 
 
+def _abs_to_universe(abs_ch: int) -> Tuple[int, int]:
+    """Convert 1-based absolute channel to (universe, 0-based offset)."""
+    universe = (abs_ch - 1) // 512 + 1
+    offset   = (abs_ch - 1) % 512
+    return universe, offset
+
+
 def _build_e131_packet(universe: int, channel_data: bytes) -> bytes:
     """Build a minimal E1.31 sACN UDP packet."""
     slots = len(channel_data)  # 1-512
-    seq = 0  # stateless — fine for single-pixel firing
+    seq = 0
 
-    # DMP layer
-    dmp_pdu_length = 11 + slots
-    dmp = struct.pack(
-        "!HBBHHBxx",
-        0x7000 | dmp_pdu_length,  # flags+length
-        0x02,                     # vector
-        0xA1,                     # address type
-        0x0000,                   # first property address
-        0x0001,                   # address increment
-        slots,                    # property count (low byte; high byte in xx)
-    )
-    # property count is 16-bit; repack cleanly
     dmp = (
-        struct.pack("!H", 0x7000 | dmp_pdu_length)
+        struct.pack("!H", 0x7000 | (11 + slots))
         + b"\x02\xa1"
         + struct.pack("!HHH", 0x0000, 0x0001, slots)
         + channel_data
     )
 
-    # Framing layer
     source_name = b"BlinkyMap\x00" + b"\x00" * (64 - len("BlinkyMap\x00"))
     framing_pdu_length = 77 + len(dmp)
     framing = (
         struct.pack("!H", 0x7000 | framing_pdu_length)
-        + b"\x00\x00\x00\x04"          # vector VECTOR_E131_DATA_PACKET
+        + b"\x00\x00\x00\x04"
         + source_name
         + struct.pack("!BBHB", 100, 0, universe, seq)
-        + b"\x00"                       # options
+        + b"\x00"
         + dmp
     )
 
-    # Root layer
     root_pdu_length = 22 + len(framing)
     root = (
-        b"\x00\x10"                     # preamble
-        + b"\x00\x00"                   # postamble
-        + b"ASC-E1.17\x00\x00\x00"     # ACN packet id
+        b"\x00\x10"
+        + b"\x00\x00"
+        + b"ASC-E1.17\x00\x00\x00"
         + struct.pack("!H", 0x7000 | root_pdu_length)
-        + b"\x00\x00\x00\x04"          # vector VECTOR_ROOT_E131_DATA
+        + b"\x00\x00\x00\x04"
         + _CID
         + framing
     )
     return root
 
 
-class E131Sender:
-    def __init__(self, host: str, universe: int):
-        self.host = host
-        self.universe = universe
+# ── Pixel output abstraction ──────────────────────────────────────────────────
+
+class E131Output:
+    """Fires pixels via raw E1.31/sACN UDP — works with any E1.31 receiver."""
+
+    def __init__(self, host: str, start_channel: int, pixel_count: int,
+                 color: Tuple[int, int, int]):
+        self._universe, self._offset = _abs_to_universe(start_channel)
+        self._color = color
+        self._buf_len = min(pixel_count * 3 + self._offset, 512)
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        self._host = host
 
-    def send(self, channel_data: bytes):
-        pkt = _build_e131_packet(self.universe, channel_data)
-        self._sock.sendto(pkt, (self.host, 5568))
+    def _send_raw(self, data: bytes):
+        pkt = _build_e131_packet(self._universe, data)
+        self._sock.sendto(pkt, (self._host, 5568))
+
+    def pixel_on(self, idx: int):
+        data = bytearray(self._buf_len)
+        ch = self._offset + idx * 3
+        if ch + 2 < self._buf_len:
+            data[ch], data[ch+1], data[ch+2] = self._color
+        self._send_raw(bytes(data))
+
+    def all_off(self):
+        self._send_raw(bytes(self._buf_len))
 
     def close(self):
+        self.all_off()
         self._sock.close()
+
+
+class FPPOutput:
+    """Fires pixels via FPP's HTTP command API.
+
+    Works transparently with multisync — FPP propagates Test Start/Stop to
+    all configured remotes automatically (multisyncCommand: true).
+    start_channel is the absolute FPP channel number (e.g. 9004).
+    """
+
+    def __init__(self, host: str, start_channel: int,
+                 color: Tuple[int, int, int]):
+        self._url   = f"http://{host}/api/command"
+        self._start = start_channel
+        self._color = color
+        self._sess  = requests.Session()
+
+    def pixel_on(self, idx: int):
+        r, g, b = self._color
+        ch_start = self._start + idx * 3
+        ch_end   = ch_start + 2
+        self._sess.post(self._url, json={
+            "command": "Test Start",
+            "multisyncCommand": True,
+            "multisyncHosts": "",
+            "args": ["100", "RGB Single Color",
+                     f"{ch_start}-{ch_end}", f"#{r:02x}{g:02x}{b:02x}"],
+        }, timeout=3)
+
+    def all_off(self):
+        self._sess.post(self._url, json={
+            "command": "Test Stop",
+            "multisyncCommand": True,
+            "multisyncHosts": "",
+            "args": [],
+        }, timeout=3)
+
+    def close(self):
+        self.all_off()
+        self._sess.close()
+
+
+def _is_fpp(host: str) -> bool:
+    """Return True if host is a reachable FPP instance."""
+    try:
+        r = requests.get(f"http://{host}/api/fppd/status", timeout=1.5)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def _make_output(cfg: "ControllerConfig"):
+    """Factory: auto-detect FPP or fall back to E1.31."""
+    use_fpp = (
+        cfg.output_mode == "fpp"
+        or (cfg.output_mode == "auto" and _is_fpp(cfg.host))
+    )
+    if use_fpp:
+        log.info("Output: FPP API → http://%s (abs ch %d)", cfg.host, cfg.start_channel)
+        return FPPOutput(cfg.host, cfg.start_channel, cfg.pixel_color)
+    log.info("Output: E1.31 → %s universe %d offset %d",
+             cfg.host, *_abs_to_universe(cfg.start_channel))
+    return E131Output(cfg.host, cfg.start_channel, cfg.pixel_count, cfg.pixel_color)
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -137,11 +212,11 @@ class E131Sender:
 @dataclass
 class ControllerConfig:
     host: str = "127.0.0.1"
-    universe: int = 1
-    start_channel: int = 1       # 1-based
+    start_channel: int = 1       # 1-based absolute FPP channel
     pixel_count: int = 100
     inter_pixel_delay: float = 0.15
     pixel_color: Tuple[int, int, int] = (255, 255, 255)
+    output_mode: str = "auto"    # "auto" | "fpp" | "e131"
 
 
 # ── Camera / session geometry ─────────────────────────────────────────────────
@@ -606,11 +681,11 @@ class BlinkyServer:
         self.config = ControllerConfig()
         self.current_session: Optional[SessionConfig] = None
         self.scan_task: Optional[asyncio.Task] = None
+        self.test_task: Optional[asyncio.Task] = None
         self.clients: Set[WebSocketServerProtocol] = set()
 
-        # Per-pixel detection response — set by incoming "detection"/"no_detection"
-        self._detection_event: asyncio.Event = asyncio.Event()
-        self._last_detection: Optional[Detection] = None
+        # Per-pixel detection response queue — fed by incoming "detection"/"no_detection"
+        self._detection_queue: asyncio.Queue = asyncio.Queue()
 
     async def broadcast(self, msg: dict):
         if self.clients:
@@ -640,13 +715,14 @@ class BlinkyServer:
         t = msg.get("type")
 
         if t == "set_config":
-            self.config.host = msg.get("host", self.config.host)
-            self.config.universe = int(msg.get("universe", self.config.universe))
-            self.config.start_channel = int(msg.get("start_ch", self.config.start_channel))
-            self.config.pixel_count = int(msg.get("pixel_count", self.config.pixel_count))
+            self.config.host              = msg.get("host", self.config.host)
+            self.config.start_channel     = int(msg.get("start_ch", self.config.start_channel))
+            self.config.pixel_count       = int(msg.get("pixel_count", self.config.pixel_count))
             self.config.inter_pixel_delay = float(msg.get("delay", self.config.inter_pixel_delay))
-            self.model.pixel_count = self.config.pixel_count
-            await ws.send(json.dumps({"type": "status", "message": "Config updated"}))
+            self.config.output_mode       = msg.get("output_mode", self.config.output_mode)
+            self.model.pixel_count        = self.config.pixel_count
+            await ws.send(json.dumps({"type": "status", "message": "Config saved"}))
+            asyncio.create_task(self._probe_controller(ws))
 
         elif t == "set_session":
             sid = _new_session_id()
@@ -690,12 +766,33 @@ class BlinkyServer:
                 cy=float(msg["cy"]),
                 conf=float(msg.get("conf", 1.0)),
             )
-            self._last_detection = (idx, det)
-            self._detection_event.set()
+            await self._detection_queue.put(("detection", idx, det))
+            log.info("Detection received: pixel %d conf=%.2f", idx, det.conf)
 
         elif t == "no_detection":
-            self._last_detection = None
-            self._detection_event.set()
+            msg_idx = int(msg.get("index", -1))
+            log.debug("No-detection received: pixel %d (not queued; server uses timeout)", msg_idx)
+
+        elif t == "test_sweep":
+            if self.test_task and not self.test_task.done():
+                return
+            self.test_task = asyncio.create_task(self._run_test_sweep(ws))
+
+        elif t == "stop_test":
+            if self.test_task:
+                self.test_task.cancel()
+
+        elif t == "delete_session":
+            sid = int(msg.get("session_id", -1))
+            if sid in self.model.sessions:
+                del self.model.sessions[sid]
+                self.model.triangulate()
+                await self.broadcast({"type": "session_deleted", "session_id": sid})
+                await self.broadcast({"type": "model", "pixels": self.model.to_json_pixels()})
+                await self.broadcast({"type": "confidence", **self.model.model_confidence()})
+                suggestion = suggest_next_angle(self.model, self.model.sessions)
+                await self.broadcast({"type": "next_suggestion", **suggestion})
+                log.info("Session %d deleted (%d remaining)", sid, len(self.model.sessions))
 
         elif t == "stop_scan":
             if self.scan_task:
@@ -711,63 +808,154 @@ class BlinkyServer:
                 resp["csv"] = export_csv(self.model)
             await ws.send(json.dumps(resp))
 
+    async def _run_test_sweep(self, ws: WebSocketServerProtocol):
+        cfg  = self.config
+        loop = asyncio.get_running_loop()
+        output = None
+
+        try:
+            output = await loop.run_in_executor(None, lambda: _make_output(cfg))
+            mode = "FPP API" if isinstance(output, FPPOutput) else "E1.31"
+            n = cfg.pixel_count
+
+            for idx in range(n):
+                def _one(i=idx, o=output):
+                    o.pixel_on(i)
+                    time.sleep(0.15)
+
+                await loop.run_in_executor(None, _one)
+                await ws.send(json.dumps({
+                    "type": "test_sweep_progress",
+                    "index": idx,
+                    "total": n,
+                    "mode": mode,
+                    "start_ch": cfg.start_channel,
+                }))
+
+            await loop.run_in_executor(None, output.all_off)
+            await ws.send(json.dumps({
+                "type": "test_sweep_done", "ok": True,
+                "message": f"Sweep complete — {n} pixels via {mode} (ch {cfg.start_channel}+)",
+            }))
+
+        except asyncio.CancelledError:
+            if output:
+                try:
+                    await loop.run_in_executor(None, output.all_off)
+                except Exception:
+                    pass
+            await ws.send(json.dumps({
+                "type": "test_sweep_done", "ok": True, "message": "Stopped",
+            }))
+
+        except Exception as e:
+            await ws.send(json.dumps({
+                "type": "test_sweep_done", "ok": False, "message": f"Error: {e}",
+            }))
+
+        finally:
+            if output:
+                try:
+                    await loop.run_in_executor(None, output.close)
+                except Exception:
+                    pass
+
+    async def _probe_controller(self, ws: WebSocketServerProtocol):
+        cfg  = self.config
+        loop = asyncio.get_running_loop()
+        try:
+            if cfg.output_mode == "e131":
+                msg = f"E1.31 mode → {cfg.host} (ch {cfg.start_channel})"
+                ok  = True
+            else:
+                is_fpp = await loop.run_in_executor(None, lambda: _is_fpp(cfg.host))
+                if is_fpp:
+                    msg = f"FPP API connected @ {cfg.host} (ch {cfg.start_channel})"
+                    ok  = True
+                else:
+                    msg = f"FPP not reachable @ {cfg.host} — will use E1.31"
+                    ok  = False
+            await ws.send(json.dumps({"type": "controller_status", "ok": ok, "message": msg}))
+        except Exception as e:
+            await ws.send(json.dumps({
+                "type": "controller_status", "ok": False, "message": f"Error: {e}",
+            }))
+
     async def _run_scan(self):
         sess = self.current_session
-        cfg = self.config
-        sender = E131Sender(cfg.host, cfg.universe)
+        cfg  = self.config
+        loop = asyncio.get_running_loop()
+        log.info("_run_scan: START session=%d pixels=%d delay=%.2f",
+                 sess.session_id, cfg.pixel_count, cfg.inter_pixel_delay)
+        output = await loop.run_in_executor(None, lambda: _make_output(cfg))
 
-        total = cfg.pixel_count
-        n_channels = total * 3
-        start_ch = cfg.start_channel - 1  # 0-based offset within universe
-
+        total    = cfg.pixel_count
         detected = 0
 
         try:
+            # Drain any stale queue entries from a previous scan
+            while not self._detection_queue.empty():
+                try:
+                    self._detection_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+
             # Request background capture
             await self.broadcast({"type": "capture_background"})
-            await asyncio.sleep(0.5)   # give browser time to grab background
+            await asyncio.sleep(0.5)
 
             for idx in range(total):
-                # Build channel data: all off except this pixel
-                data = bytearray(min(n_channels + start_ch, 512))
-                ch = start_ch + idx * 3
-                if ch + 2 < len(data):
-                    r, g, b = cfg.pixel_color
-                    data[ch] = r
-                    data[ch + 1] = g
-                    data[ch + 2] = b
-
-                sender.send(bytes(data))
+                await loop.run_in_executor(None, lambda i=idx: output.pixel_on(i))
+                # Allow FPP multisync to propagate to remotes before browser captures
+                await asyncio.sleep(cfg.inter_pixel_delay)
                 await self.broadcast({"type": "pixel_on", "index": idx})
 
-                # Wait for browser detection response (or timeout)
-                self._detection_event.clear()
-                self._last_detection = None
-                try:
-                    await asyncio.wait_for(self._detection_event.wait(),
-                                           timeout=cfg.inter_pixel_delay + 2.0)
-                except asyncio.TimeoutError:
-                    pass
+                # Drain any stale detections from the previous pixel
+                while not self._detection_queue.empty():
+                    try:
+                        self._detection_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
 
-                if self._last_detection is not None:
-                    det_idx, det = self._last_detection
+                # Wait for browser detection — only positive detections are queued;
+                # no_detection is not queued so the timeout handles missed pixels.
+                try:
+                    _, det_idx, det = await asyncio.wait_for(
+                        self._detection_queue.get(),
+                        timeout=0.5,
+                    )
                     if det_idx == idx:
                         self.model.record_detection(sess.session_id, idx, det)
                         detected += 1
+                        log.info("Scan pixel %d: COUNTED conf=%.2f", idx, det.conf)
+                    else:
+                        log.warning("Scan pixel %d: stale detection for pixel %d", idx, det_idx)
+                except asyncio.TimeoutError:
+                    log.debug("Scan pixel %d: not detected (timeout)", idx)
+                except Exception as e:
+                    log.error("Scan pixel %d: unexpected error: %s", idx, e, exc_info=True)
 
-                # Turn pixel off
-                sender.send(bytes(min(n_channels + start_ch, 512)))
                 await self.broadcast({"type": "pixel_off"})
-
                 await self.broadcast({"type": "progress", "index": idx, "total": total})
+                await asyncio.sleep(0.02)
 
-                await asyncio.sleep(0.02)  # small gap between pixels
+            log.info("_run_scan: DONE detected=%d/%d", detected, total)
 
+            await loop.run_in_executor(None, output.all_off)
+            _, det_dict = self.model.sessions[sess.session_id]
+            detections_out = {
+                idx: {"cx": round(d.cx, 1), "cy": round(d.cy, 1), "conf": round(d.conf, 3)}
+                for idx, d in det_dict.items()
+            }
             await self.broadcast({
                 "type": "scan_complete",
                 "session": sess.session_id,
                 "detected": detected,
                 "total": total,
+                "detections": detections_out,
+                "angle": sess.angle_deg,
+                "distance": sess.distance_m,
+                "height": sess.height_m,
             })
 
             # Triangulate and broadcast model
@@ -789,11 +977,10 @@ class BlinkyServer:
             })
 
         except asyncio.CancelledError:
-            # Turn all pixels off
-            sender.send(bytes(512))
+            await loop.run_in_executor(None, output.all_off)
             log.info("Scan cancelled")
         finally:
-            sender.close()
+            await loop.run_in_executor(None, output.close)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

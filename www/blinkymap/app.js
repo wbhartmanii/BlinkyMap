@@ -10,8 +10,8 @@
 import { openCamera, captureBackground, detectLED } from "./camera.js";
 import { Viewer3D } from "./viewer3d.js";
 
-// ── Infer WebSocket URL (same host, port 8765) ────────────────────────────────
-const WS_URL = `ws://${location.hostname}:8765`;
+// ── WebSocket URL — proxied through Apache at same origin to satisfy CSP ─────
+const WS_URL = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/blinkymap-ws`;
 
 // ── DOM references ────────────────────────────────────────────────────────────
 const wsIndicator    = document.getElementById("ws-indicator");
@@ -19,13 +19,20 @@ const tabBtns        = document.querySelectorAll(".tab-btn");
 const tabPanels      = document.querySelectorAll(".tab-panel");
 
 const cfgHost        = document.getElementById("cfg-host");
-const cfgUniverse    = document.getElementById("cfg-universe");
+const cfgOutputMode  = document.getElementById("cfg-output-mode");
 const cfgStart       = document.getElementById("cfg-start");
 const cfgPixels      = document.getElementById("cfg-pixels");
 const cfgDelay       = document.getElementById("cfg-delay");
 const cfgFov         = document.getElementById("cfg-fov");
-const btnSaveConfig  = document.getElementById("btn-save-config");
+const cfgMinConf     = document.getElementById("cfg-min-conf");
+const cfgMinConfVal  = document.getElementById("cfg-min-conf-val");
+const btnSaveConfig      = document.getElementById("btn-save-config");
+const controllerStatus   = document.getElementById("controller-status");
+const btnTestBlink       = document.getElementById("btn-test-blink");
+const btnStopTest    = document.getElementById("btn-stop-test");
+const testResultMsg  = document.getElementById("test-result-msg");
 const btnOpenCamera  = document.getElementById("btn-open-camera");
+const camStatusBar   = document.getElementById("cam-status-bar");
 const camPreview     = document.getElementById("cam-preview");
 const camCanvas      = document.getElementById("cam-canvas");
 
@@ -47,12 +54,16 @@ const confidencePct  = document.getElementById("confidence-pct");
 const confidenceGrade= document.getElementById("confidence-grade");
 const confidenceDet  = document.getElementById("confidence-detail");
 
+const diffCanvas     = document.getElementById("diff-canvas");
+const diffLabel      = document.getElementById("diff-label");
 const viewerContainer= document.getElementById("viewer-container");
 const pixelListEl    = document.getElementById("pixel-list");
 
 const exportConfLabel= document.getElementById("export-confidence-label");
 const btnExportXmodel= document.getElementById("btn-export-xmodel");
 const btnExportCsv   = document.getElementById("btn-export-csv");
+const unitToggle     = document.getElementById("unit-toggle");
+const confidenceTip  = document.getElementById("confidence-tip");
 
 // ── App state ─────────────────────────────────────────────────────────────────
 let ws           = null;
@@ -61,10 +72,21 @@ let bgImageData  = null;
 let camWidth     = 1280;
 let camHeight    = 720;
 let scanning     = false;
-let currentPixelIdx = -1;   // pixel the server is currently firing
-let sessions        = [];    // [{id, angle, detected, total}]
-let latestPixels    = [];    // last model from server
-let lastSuggestion  = null;  // last next_suggestion payload
+let currentPixelIdx = -1;
+let sessions        = [];
+let latestPixels    = [];
+let lastSuggestion  = null;
+let units           = "m";   // "m" or "ft"
+
+// ── Unit helpers ──────────────────────────────────────────────────────────────
+function formatDist(meters) {
+  return units === "ft"
+    ? `${(meters * 3.28084).toFixed(1)} ft`
+    : `${meters.toFixed(1)} m`;
+}
+function toMeters(val) {
+  return units === "ft" ? val / 3.28084 : val;
+}
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
 tabBtns.forEach(btn => {
@@ -130,29 +152,35 @@ async function handleServerMessage(msg) {
     case "capture_background":
       if (camPreview.srcObject) {
         bgImageData = captureBackground(camPreview, camCanvas);
+        camStatusBar.textContent = "Camera: background captured — scanning…";
+        camStatusBar.className   = "cam-status cam-status-bg";
         statusMsg("Background captured");
+      } else {
+        camStatusBar.textContent = "Camera: not open — detections will be skipped";
+        camStatusBar.className   = "cam-status cam-status-off";
       }
       break;
 
     case "pixel_on":
       currentPixelIdx = msg.index;
       if (bgImageData && camPreview.srcObject) {
-        // Small settle delay then detect
         await sleep(80);
-        const result = detectLED(camPreview, camCanvas, bgImageData);
-        if (result.found) {
+        const result = detectLED(camPreview, camCanvas, bgImageData, 25);
+        // Draw amplified diff so user can see what the camera sees
+        drawDiff(camCanvas, bgImageData, msg.index, result);
+        const minConf = parseInt(cfgMinConf.value) / 100;
+        if (result.found && result.conf >= minConf) {
           send({
             type: "detection",
-            index: currentPixelIdx,
+            index: msg.index,
             cx:   result.cx,
             cy:   result.cy,
             conf: result.conf,
           });
         } else {
-          send({ type: "no_detection", index: currentPixelIdx });
+          send({ type: "no_detection", index: msg.index });
         }
       } else {
-        // No camera — just acknowledge so scan doesn't stall
         send({ type: "no_detection", index: msg.index });
       }
       break;
@@ -168,8 +196,13 @@ async function handleServerMessage(msg) {
     case "scan_complete":
       scanning = false;
       scanBlock.style.display = "none";
-      addSessionCard(msg.session, msg.detected, msg.total);
+      addSessionCard(msg.session, msg.detected, msg.total, msg.detections || {},
+                     msg.angle ?? 0, msg.distance ?? 2, msg.height ?? 1.5);
       statusMsg(`Session ${msg.session}: ${msg.detected}/${msg.total} detected`);
+      if (camPreview.srcObject) {
+        camStatusBar.textContent = `Camera active — ${msg.detected}/${msg.total} pixels detected last session`;
+        camStatusBar.className   = "cam-status " + (msg.detected > 0 ? "cam-status-on" : "cam-status-off");
+      }
       break;
 
     case "model":
@@ -188,6 +221,28 @@ async function handleServerMessage(msg) {
       if (viewer) viewer.setSuggestion(msg.angle, msg.distance);
       break;
 
+    case "session_deleted":
+      sessions = sessions.filter(s => s.id !== msg.session_id);
+      sessionList.querySelector(`[data-session-id="${msg.session_id}"]`)?.remove();
+      break;
+
+    case "controller_status":
+      controllerStatus.textContent = msg.message;
+      controllerStatus.className   = `controller-status ${msg.ok ? "ctrl-ok" : "ctrl-fail"}`;
+      controllerStatus.style.display = "block";
+      break;
+
+    case "test_sweep_progress":
+      showTestResult(true,
+        `Pixel ${msg.index + 1} / ${msg.total} · ${msg.mode} · ch ${msg.start_ch + msg.index * 3}`);
+      break;
+
+    case "test_sweep_done":
+      btnTestBlink.style.display = "block";
+      btnStopTest.style.display  = "none";
+      showTestResult(msg.ok, msg.message);
+      break;
+
     case "export_ready":
       if (msg.xmodel) triggerDownload("BlinkyTree.xmodel", msg.xmodel, "text/xml");
       if (msg.csv)    triggerDownload("BlinkyTree.csv",    msg.csv,    "text/csv");
@@ -198,14 +253,80 @@ async function handleServerMessage(msg) {
 // ── Config ────────────────────────────────────────────────────────────────────
 btnSaveConfig.addEventListener("click", () => {
   send({
-    type:       "set_config",
-    host:       cfgHost.value.trim(),
-    universe:   parseInt(cfgUniverse.value),
-    start_ch:   parseInt(cfgStart.value),
-    pixel_count:parseInt(cfgPixels.value),
-    delay:      parseFloat(cfgDelay.value),
+    type:        "set_config",
+    host:        cfgHost.value.trim(),
+    output_mode: cfgOutputMode.value,
+    start_ch:    parseInt(cfgStart.value),
+    pixel_count: parseInt(cfgPixels.value),
+    delay:       parseFloat(cfgDelay.value),
   });
-  statusMsg("Config sent");
+  controllerStatus.textContent = `Checking ${cfgHost.value.trim()}…`;
+  controllerStatus.className   = "controller-status ctrl-ok";
+  controllerStatus.style.display = "block";
+});
+
+// ── Test blink ────────────────────────────────────────────────────────────────
+btnTestBlink.addEventListener("click", () => {
+  send({ type: "test_sweep" });
+  btnTestBlink.style.display = "none";
+  btnStopTest.style.display  = "block";
+  showTestResult(true, "Starting sweep…");
+});
+
+btnStopTest.addEventListener("click", () => {
+  send({ type: "stop_test" });
+  btnStopTest.style.display = "none";
+});
+
+let _testResultTimer = null;
+function showTestResult(ok, message) {
+  testResultMsg.textContent = message;
+  testResultMsg.className   = `test-result ${ok ? "test-ok" : "test-fail"}`;
+  testResultMsg.style.display = "block";
+  clearTimeout(_testResultTimer);
+  // Auto-hide after 8 s once we have a final answer (not "Connecting…"/"Sending…")
+  if (!message.endsWith("…")) {
+    _testResultTimer = setTimeout(() => { testResultMsg.style.display = "none"; }, 8000);
+  }
+}
+
+// ── Min-confidence slider ─────────────────────────────────────────────────────
+cfgMinConf.addEventListener("input", () => {
+  cfgMinConfVal.textContent = `${cfgMinConf.value}%`;
+});
+
+// ── Unit toggle ───────────────────────────────────────────────────────────────
+unitToggle.addEventListener("click", e => {
+  const btn = e.target.closest(".unit-btn");
+  if (!btn || btn.dataset.unit === units) return;
+  const prev = units;
+  units = btn.dataset.unit;
+
+  // Update button styles
+  unitToggle.querySelectorAll(".unit-btn").forEach(b =>
+    b.classList.toggle("active", b.dataset.unit === units));
+
+  // Update label suffixes
+  document.querySelectorAll(".unit-sfx").forEach(el => el.textContent = units);
+
+  // Convert distance/height input values
+  const factor = units === "ft" ? 3.28084 : 1 / 3.28084;
+  for (const el of [sessDist, sessHeight]) {
+    const v = parseFloat(el.value);
+    if (!isNaN(v)) el.value = (v * factor).toFixed(2);
+  }
+
+  // Update existing session card positions
+  document.querySelectorAll(".session-card[data-dist-m]").forEach(card => {
+    card.querySelector(".sess-pos").textContent = sessionPosStr(
+      parseFloat(card.dataset.angle),
+      parseFloat(card.dataset.distM),
+      parseFloat(card.dataset.heightM),
+    );
+  });
+
+  // Update suggestion card if showing
+  if (lastSuggestion) showSuggestion(lastSuggestion);
 });
 
 // ── Camera ────────────────────────────────────────────────────────────────────
@@ -215,6 +336,8 @@ btnOpenCamera.addEventListener("click", async () => {
     camWidth  = dim.width;
     camHeight = dim.height;
     camPreview.style.display = "block";
+    camStatusBar.textContent = `Camera active (${camWidth}×${camHeight}) — ready to scan`;
+    camStatusBar.className   = "cam-status cam-status-on";
     send({
       type:     "set_fov",
       hfov_deg: parseFloat(cfgFov.value),
@@ -231,9 +354,9 @@ btnOpenCamera.addEventListener("click", async () => {
 btnStartSess.addEventListener("click", () => {
   if (scanning) { alert("Scan already running"); return; }
 
-  const angle    = parseFloat(sessAngle.value)  || 0;
-  const distance = parseFloat(sessDist.value)   || 2.0;
-  const height   = parseFloat(sessHeight.value) || 1.5;
+  const angle    = parseFloat(sessAngle.value) || 0;
+  const distance = toMeters(parseFloat(sessDist.value)   || (units === "ft" ? 6.56 : 2.0));
+  const height   = toMeters(parseFloat(sessHeight.value) || (units === "ft" ? 4.92 : 1.5));
 
   send({
     type:     "set_session",
@@ -268,23 +391,73 @@ function updateProgress(done, total) {
   progressLabel.textContent = `${done} / ${total}`;
 }
 
-function addSessionCard(sessionId, detected, total) {
-  sessions.push({ id: sessionId, detected, total });
+function sessionPosStr(angle, distM, heightM) {
+  return `${Math.round(angle)}° · ${formatDist(distM)} away · ${formatDist(heightM)} high`;
+}
+
+function addSessionCard(sessionId, detected, total, detections, angleDeg, distM, heightM) {
+  sessions.push({ id: sessionId, detected, total, detections, angleDeg, distM, heightM });
   const pct = total > 0 ? Math.round((detected / total) * 100) : 0;
   const badge = pct >= 70 ? "badge-good" : pct >= 40 ? "badge-medium" : "badge-poor";
+
+  let rows = "";
+  for (let i = 0; i < total; i++) {
+    const d = detections[i];
+    if (d) {
+      rows += `<div class="sess-row sess-row-seen">
+        <span>${i + 1}</span>
+        <span class="sess-seen-yes">✓</span>
+        <span>${Math.round(d.conf * 100)}%</span>
+        <span>${Math.round(d.cx)}</span>
+        <span>${Math.round(d.cy)}</span>
+      </div>`;
+    } else {
+      rows += `<div class="sess-row sess-row-unseen">
+        <span>${i + 1}</span>
+        <span class="sess-seen-no">–</span>
+        <span>–</span><span>–</span><span>–</span>
+      </div>`;
+    }
+  }
+
   const card = document.createElement("div");
   card.className = "session-card";
+  card.dataset.sessionId = sessionId;
+  card.dataset.angle     = angleDeg;
+  card.dataset.distM     = distM;
+  card.dataset.heightM   = heightM;
   card.innerHTML = `
-    <span>Session ${sessionId}</span>
-    <span class="badge ${badge}">${detected}/${total} (${pct}%)</span>
+    <div class="session-card-header">
+      <div class="sess-title">
+        <div class="sess-name">Session ${sessionId}</div>
+        <div class="sess-pos">${sessionPosStr(angleDeg, distM, heightM)}</div>
+      </div>
+      <span class="badge ${badge}">${detected}/${total} (${pct}%)</span>
+      <span class="sess-chevron">▸</span>
+      <button class="session-delete" title="Delete this session">&#x2715;</button>
+    </div>
+    <div class="session-detail">
+      <div class="sess-col-header">
+        <span>Ch#</span><span>Seen</span><span>Conf</span><span>ImgX</span><span>ImgY</span>
+      </div>
+      <div class="sess-pixel-list">${rows}</div>
+    </div>
   `;
+
+  card.querySelector(".session-card-header").addEventListener("click", e => {
+    if (e.target.closest(".session-delete")) return;
+    card.classList.toggle("expanded");
+  });
+  card.querySelector(".session-delete").addEventListener("click", () => {
+    send({ type: "delete_session", session_id: sessionId });
+  });
   sessionList.appendChild(card);
 }
 
 function showSuggestion(msg) {
   const angle = msg.angle ?? 0;
   suggAngle.textContent  = `${angle}°`;
-  suggDist.textContent   = `${msg.distance ?? 2}m from trunk · same height`;
+  suggDist.textContent   = `${formatDist(msg.distance ?? 2)} from center · same height`;
   suggReason.textContent = msg.reason ?? "";
   suggCard.style.display = "block";
 }
@@ -309,6 +482,22 @@ function updateConfidence(msg) {
   confidenceDet.textContent =
     `Coverage ${Math.round((msg.coverage ?? 0)*100)}% · ` +
     `High ${msg.high ?? 0} · Med ${msg.medium ?? 0} · Low ${msg.low ?? 0} · Unseen ${msg.unseen ?? 0}`;
+
+  // Contextual tip
+  const nSess = sessions.length;
+  let tip;
+  if (nSess === 0) {
+    tip = "Complete your first scan to start building the model.";
+  } else if (nSess === 1) {
+    tip = "Scan from a second angle (~180° away) to enable 3D triangulation — positions can't be calculated from one view alone.";
+  } else if (pct < 20) {
+    tip = `Only ${msg.high + msg.medium} pixels triangulated so far. Try more angles or lower the detection confidence threshold.`;
+  } else if ((msg.unseen ?? 0) > (msg.high + msg.medium + msg.low)) {
+    tip = `${msg.unseen} pixels still unseen — scan from more angles to find them.`;
+  } else {
+    tip = `${msg.high} high-confidence · ${msg.medium} medium · ${msg.low} low · ${msg.unseen} unseen. Add more angles to improve accuracy.`;
+  }
+  confidenceTip.textContent = tip;
 
   // Update export tab label
   exportConfLabel.textContent = `Model confidence: ${pct}% (${msg.grade})`;
@@ -354,6 +543,67 @@ function triggerDownload(filename, content, mime) {
 
 // ── Utility ───────────────────────────────────────────────────────────────────
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function drawDiff(srcCanvas, bgImageData, pixelIdx, result) {
+  const W = srcCanvas.width;
+  const H = srcCanvas.height;
+  if (!W || !H) return;
+
+  const srcCtx  = srcCanvas.getContext("2d", { willReadFrequently: true });
+  const litData = srcCtx.getImageData(0, 0, W, H);
+  const bg      = bgImageData.data;
+  const lit     = litData.data;
+
+  // Scale down 4× for the preview canvas
+  const scale  = 4;
+  const dW     = Math.floor(W / scale);
+  const dH     = Math.floor(H / scale);
+  diffCanvas.width  = dW;
+  diffCanvas.height = dH;
+
+  const dCtx  = diffCanvas.getContext("2d");
+  const imgD  = dCtx.createImageData(dW, dH);
+  const d     = imgD.data;
+
+  let peakLum = 0;
+  for (let dy = 0; dy < dH; dy++) {
+    for (let dx = 0; dx < dW; dx++) {
+      const sx = dx * scale;
+      const sy = dy * scale;
+      const si = (sy * W + sx) * 4;
+      const di = (dy * dW + dx) * 4;
+      const dr = Math.max(0, lit[si]   - bg[si]);
+      const dg = Math.max(0, lit[si+1] - bg[si+1]);
+      const db = Math.max(0, lit[si+2] - bg[si+2]);
+      const lum = 0.299 * dr + 0.587 * dg + 0.114 * db;
+      if (lum > peakLum) peakLum = lum;
+      // Amplify 4× so faint signals are visible
+      d[di]   = Math.min(255, dr * 4);
+      d[di+1] = Math.min(255, dg * 4);
+      d[di+2] = Math.min(255, db * 4);
+      d[di+3] = 255;
+    }
+  }
+  dCtx.putImageData(imgD, 0, 0);
+
+  // Draw crosshair if detected
+  if (result.found) {
+    dCtx.strokeStyle = "#69f0ae";
+    dCtx.lineWidth   = 1;
+    const cx = result.cx / scale;
+    const cy = result.cy / scale;
+    dCtx.beginPath();
+    dCtx.moveTo(cx - 8, cy); dCtx.lineTo(cx + 8, cy);
+    dCtx.moveTo(cx, cy - 8); dCtx.lineTo(cx, cy + 8);
+    dCtx.stroke();
+  }
+
+  const status = result.found
+    ? `Pixel ${pixelIdx + 1}: detected  conf=${(result.conf * 100).toFixed(0)}%  peak=${peakLum.toFixed(0)}`
+    : `Pixel ${pixelIdx + 1}: not found  peak=${peakLum.toFixed(0)}`;
+  diffLabel.textContent = status;
+  console.log("[BlinkyMap]", status);
+}
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 connect();

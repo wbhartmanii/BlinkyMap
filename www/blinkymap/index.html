@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>BlinkyMap</title>
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="style.css?v=12" />
 
   <!-- Import map for Three.js (served locally after install.sh) -->
   <script type="importmap">
@@ -22,6 +22,10 @@
 <!-- ── Header ── -->
 <header id="app-header">
   <div class="header-logo">&#128336; BlinkyMap</div>
+  <div id="unit-toggle">
+    <button class="unit-btn active" data-unit="m">m</button>
+    <button class="unit-btn" data-unit="ft">ft</button>
+  </div>
   <div id="ws-indicator" class="dot dot-red" title="WebSocket status"></div>
 </header>
 
@@ -41,11 +45,15 @@
   <label>FPP / Controller IP
     <input id="cfg-host" type="text" value="127.0.0.1" inputmode="decimal" />
   </label>
-  <label>Universe
-    <input id="cfg-universe" type="number" value="1" min="1" max="63999" />
+  <label>Output Mode
+    <select id="cfg-output-mode">
+      <option value="auto">Auto-detect (FPP API or E1.31)</option>
+      <option value="fpp">FPP API (multisync-aware)</option>
+      <option value="e131">E1.31 / sACN (direct)</option>
+    </select>
   </label>
-  <label>Start Channel
-    <input id="cfg-start" type="number" value="1" min="1" max="512" />
+  <label>Start Channel (absolute FPP channel)
+    <input id="cfg-start" type="number" value="1" min="1" max="999999" />
   </label>
   <label>Pixel Count
     <input id="cfg-pixels" type="number" value="100" min="1" max="2048" />
@@ -54,12 +62,21 @@
     <input id="cfg-delay" type="number" value="0.15" min="0.05" max="2" step="0.05" />
   </label>
   <button class="btn-primary wide" id="btn-save-config">Save &amp; Connect</button>
+  <div id="controller-status" class="controller-status" style="display:none"></div>
+  <button class="btn-secondary wide" id="btn-test-blink">Test Sweep</button>
+  <button class="btn-danger wide"     id="btn-stop-test" style="display:none">Stop Sweep</button>
+  <p id="test-result-msg" class="test-result" style="display:none"></p>
 
   <h2>Camera</h2>
-  <label>Horizontal FOV (&deg;)
+  <label>Horizontal FOV (°)
     <input id="cfg-fov" type="number" value="60" min="20" max="170" step="1" />
   </label>
-  <button class="btn-secondary wide" id="btn-open-camera">Open Phone Camera</button>
+  <label>
+    <span>Min Detection Confidence: <span id="cfg-min-conf-val">50%</span></span>
+    <input id="cfg-min-conf" type="range" value="50" min="5" max="95" step="5" />
+    <span class="slider-hint">Lower → more pixels detected (more false positives) · Higher → fewer but more accurate</span>
+  </label>
+  <button class="btn-secondary wide" id="btn-open-camera">Open Camera</button>
   <video id="cam-preview" autoplay playsinline muted></video>
   <canvas id="cam-canvas" style="display:none"></canvas>
 </section>
@@ -69,15 +86,18 @@
      ══════════════════════════════════════════════════════════════════════════ -->
 <section id="tab-scan" class="tab-panel">
   <h2>Session Position</h2>
-  <label>Angle around tree (&deg;)
+  <label>Angle around model (°)
     <input id="sess-angle" type="number" value="0" min="0" max="359" step="5" />
   </label>
-  <label>Distance from trunk (m)
+  <label>Distance from center (<span class="unit-sfx">m</span>)
     <input id="sess-dist" type="number" value="2.0" min="0.5" max="20" step="0.5" />
   </label>
-  <label>Camera height (m)
+  <label>Camera height (<span class="unit-sfx">m</span>)
     <input id="sess-height" type="number" value="1.5" min="0.2" max="10" step="0.1" />
   </label>
+  <div id="cam-status-bar" class="cam-status cam-status-off">
+    Camera: not open &mdash; open in Setup tab before scanning
+  </div>
   <button class="btn-primary wide" id="btn-start-session">Start Session</button>
 
   <div id="scan-progress-block" style="display:none">
@@ -85,6 +105,10 @@
       <div id="scan-progress-bar" class="progress-bar"></div>
     </div>
     <p id="scan-progress-label">0 / 0</p>
+    <div id="scan-debug">
+      <canvas id="diff-canvas"></canvas>
+      <div id="diff-label">diff view</div>
+    </div>
     <button class="btn-danger wide" id="btn-stop-scan">Stop Scan</button>
   </div>
 
@@ -107,6 +131,7 @@
     <div id="confidence-pct">–</div>
     <div id="confidence-grade">–</div>
     <div id="confidence-detail"></div>
+    <div id="confidence-tip"></div>
   </div>
 </section>
 
@@ -134,13 +159,13 @@
 
   <h2>xLights Import</h2>
   <ol class="instructions">
-    <li>Open xLights &rarr; <strong>Layout</strong> tab.</li>
-    <li>Right-click model list &rarr; <strong>Import Model</strong>.</li>
+    <li>Open xLights → <strong>Layout</strong> tab.</li>
+    <li>Right-click model list → <strong>Import Model</strong>.</li>
     <li>Select <code>BlinkyTree.xmodel</code>.</li>
     <li>The model uses cylindrical-unwrap: rows = height, cols = angle.</li>
   </ol>
 </section>
 
-<script type="module" src="app.js"></script>
+<script type="module" src="app.js?v=12"></script>
 </body>
 </html>
