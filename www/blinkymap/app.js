@@ -24,6 +24,8 @@ const cfgStart       = document.getElementById("cfg-start");
 const cfgPixels      = document.getElementById("cfg-pixels");
 const cfgDelay       = document.getElementById("cfg-delay");
 const cfgFov         = document.getElementById("cfg-fov");
+const cfgMinConf     = document.getElementById("cfg-min-conf");
+const cfgMinConfVal  = document.getElementById("cfg-min-conf-val");
 const btnSaveConfig      = document.getElementById("btn-save-config");
 const controllerStatus   = document.getElementById("controller-status");
 const btnTestBlink       = document.getElementById("btn-test-blink");
@@ -153,7 +155,8 @@ async function handleServerMessage(msg) {
         const result = detectLED(camPreview, camCanvas, bgImageData, 25);
         // Draw amplified diff so user can see what the camera sees
         drawDiff(camCanvas, bgImageData, msg.index, result);
-        if (result.found && result.conf >= 0.5) {
+        const minConf = parseInt(cfgMinConf.value) / 100;
+        if (result.found && result.conf >= minConf) {
           send({
             type: "detection",
             index: msg.index,
@@ -267,6 +270,11 @@ function showTestResult(ok, message) {
     _testResultTimer = setTimeout(() => { testResultMsg.style.display = "none"; }, 8000);
   }
 }
+
+// ── Min-confidence slider ─────────────────────────────────────────────────────
+cfgMinConf.addEventListener("input", () => {
+  cfgMinConfVal.textContent = `${cfgMinConf.value}%`;
+});
 
 // ── Camera ────────────────────────────────────────────────────────────────────
 btnOpenCamera.addEventListener("click", async () => {
