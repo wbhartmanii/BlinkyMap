@@ -684,9 +684,8 @@ class BlinkyServer:
         self.test_task: Optional[asyncio.Task] = None
         self.clients: Set[WebSocketServerProtocol] = set()
 
-        # Per-pixel detection response — set by incoming "detection"/"no_detection"
-        self._detection_event: asyncio.Event = asyncio.Event()
-        self._last_detection: Optional[Detection] = None
+        # Per-pixel detection response queue — fed by incoming "detection"/"no_detection"
+        self._detection_queue: asyncio.Queue = asyncio.Queue()
 
     async def broadcast(self, msg: dict):
         if self.clients:
@@ -767,14 +766,13 @@ class BlinkyServer:
                 cy=float(msg["cy"]),
                 conf=float(msg.get("conf", 1.0)),
             )
-            self._last_detection = (idx, det)
-            self._detection_event.set()
+            await self._detection_queue.put(("detection", idx, det))
             log.info("Detection received: pixel %d conf=%.2f", idx, det.conf)
 
         elif t == "no_detection":
-            self._last_detection = None
-            self._detection_event.set()
-            log.debug("No-detection received: pixel %d", msg.get("index", -1))
+            msg_idx = int(msg.get("index", -1))
+            await self._detection_queue.put(("no_detection", msg_idx, None))
+            log.debug("No-detection received: pixel %d", msg_idx)
 
         elif t == "test_sweep":
             if self.test_task and not self.test_task.done():
@@ -882,6 +880,13 @@ class BlinkyServer:
         detected = 0
 
         try:
+            # Drain any stale queue entries from a previous scan
+            while not self._detection_queue.empty():
+                try:
+                    self._detection_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+
             # Request background capture
             await self.broadcast({"type": "capture_background"})
             await asyncio.sleep(0.5)
@@ -892,25 +897,33 @@ class BlinkyServer:
                 await asyncio.sleep(cfg.inter_pixel_delay)
                 await self.broadcast({"type": "pixel_on", "index": idx})
 
+                # Drain any late-arriving responses from the previous pixel
+                while not self._detection_queue.empty():
+                    try:
+                        self._detection_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+
                 # Wait for browser detection response (or timeout)
-                self._detection_event.clear()
-                self._last_detection = None
                 try:
-                    await asyncio.wait_for(self._detection_event.wait(),
-                                           timeout=cfg.inter_pixel_delay + 2.0)
+                    kind, det_idx, det = await asyncio.wait_for(
+                        self._detection_queue.get(),
+                        timeout=cfg.inter_pixel_delay + 2.0,
+                    )
+                    log.debug("Scan pixel %d: response kind=%s det_idx=%d", idx, kind, det_idx)
+                    if kind == "detection":
+                        if det_idx == idx:
+                            self.model.record_detection(sess.session_id, idx, det)
+                            detected += 1
+                            log.info("Scan pixel %d: COUNTED conf=%.2f", idx, det.conf)
+                        else:
+                            log.warning("Scan pixel %d: index mismatch got=%d", idx, det_idx)
+                    else:
+                        log.debug("Scan pixel %d: no detection", idx)
                 except asyncio.TimeoutError:
                     log.warning("Scan pixel %d: timed out waiting for browser", idx)
-
-                if self._last_detection is not None:
-                    det_idx, det = self._last_detection
-                    if det_idx == idx:
-                        self.model.record_detection(sess.session_id, idx, det)
-                        detected += 1
-                        log.info("Scan pixel %d: COUNTED conf=%.2f", idx, det.conf)
-                    else:
-                        log.warning("Scan pixel %d: index mismatch got=%d", idx, det_idx)
-                else:
-                    log.debug("Scan pixel %d: no detection (timeout or no_detection)", idx)
+                except Exception as e:
+                    log.error("Scan pixel %d: unexpected error: %s", idx, e)
 
                 await self.broadcast({"type": "pixel_off"})
                 await self.broadcast({"type": "progress", "index": idx, "total": total})
