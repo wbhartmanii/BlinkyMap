@@ -771,8 +771,7 @@ class BlinkyServer:
 
         elif t == "no_detection":
             msg_idx = int(msg.get("index", -1))
-            await self._detection_queue.put(("no_detection", msg_idx, None))
-            log.debug("No-detection received: pixel %d", msg_idx)
+            log.debug("No-detection received: pixel %d (not queued; server uses timeout)", msg_idx)
 
         elif t == "test_sweep":
             if self.test_task and not self.test_task.done():
@@ -914,25 +913,23 @@ class BlinkyServer:
                 if drained:
                     log.info("Scan pixel %d: drained %d stale item(s) before waiting", idx, drained)
 
-                # Wait for browser detection response (or timeout)
+                # Wait for browser detection — no_detection is not queued, so
+                # only positive detections arrive; timeout = not detected.
                 log.info("Scan pixel %d: waiting (queue size=%d)", idx, self._detection_queue.qsize())
                 try:
-                    kind, det_idx, det = await asyncio.wait_for(
+                    _, det_idx, det = await asyncio.wait_for(
                         self._detection_queue.get(),
-                        timeout=cfg.inter_pixel_delay + 2.0,
+                        timeout=0.5,
                     )
-                    log.info("Scan pixel %d: got kind=%s det_idx=%d", idx, kind, det_idx)
-                    if kind == "detection":
-                        if det_idx == idx:
-                            self.model.record_detection(sess.session_id, idx, det)
-                            detected += 1
-                            log.info("Scan pixel %d: COUNTED conf=%.2f", idx, det.conf)
-                        else:
-                            log.warning("Scan pixel %d: index mismatch got=%d", idx, det_idx)
+                    log.info("Scan pixel %d: got detection det_idx=%d", idx, det_idx)
+                    if det_idx == idx:
+                        self.model.record_detection(sess.session_id, idx, det)
+                        detected += 1
+                        log.info("Scan pixel %d: COUNTED conf=%.2f", idx, det.conf)
                     else:
-                        log.info("Scan pixel %d: no_detection received", idx)
+                        log.warning("Scan pixel %d: stale detection for pixel %d", idx, det_idx)
                 except asyncio.TimeoutError:
-                    log.warning("Scan pixel %d: timed out waiting for browser", idx)
+                    log.info("Scan pixel %d: not detected (timeout)", idx)
                 except Exception as e:
                     log.error("Scan pixel %d: unexpected error: %s", idx, e, exc_info=True)
 
