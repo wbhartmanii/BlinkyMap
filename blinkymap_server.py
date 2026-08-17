@@ -386,7 +386,9 @@ class BlinkyModel:
                 # All pairs → triangulate, take median
                 candidates: List[np.ndarray] = []
                 reproj_errors: List[float] = []
-                paired_projections: List[Tuple[np.ndarray, SessionConfig]] = []
+                # Track by session id — projection matrices are numpy arrays and
+                # can't be compared with `in` (ambiguous truth value).
+                paired_sids: List[int] = []
 
                 for i in range(len(obs)):
                     for j in range(i + 1, len(obs)):
@@ -403,15 +405,14 @@ class BlinkyModel:
                             err_a = _reprojection_error(P_a, X, (det_a.cx, det_a.cy))
                             err_b = _reprojection_error(P_b, X, (det_b.cx, det_b.cy))
                             reproj_errors.append((err_a + err_b) / 2.0)
-                            if (P_a, sc_a) not in paired_projections:
-                                paired_projections.append((P_a, sc_a))
-                            if (P_b, sc_b) not in paired_projections:
-                                paired_projections.append((P_b, sc_b))
+                            for sid_seen in (sid_a, sid_b):
+                                if sid_seen not in paired_sids:
+                                    paired_sids.append(sid_seen)
 
                 if candidates:
                     pos = np.median(np.array(candidates), axis=0)
                     mean_err = float(np.median(reproj_errors))
-                    spread = _angular_spread(paired_projections)
+                    spread = _angular_spread([proj[s_id] for s_id in paired_sids])
                     n = len(obs)
                     coverage = min(n / max(len(self.sessions), 1), 1.0)
                     # Normalise reprojection error (0px→1.0, 20px→0.0)
