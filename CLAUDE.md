@@ -28,9 +28,12 @@ BlinkyMap is an FPP (Falcon Player) plugin that automatically builds a 3D xLight
 ### Test platform (primary) — `FPP-Test`
 - **Host**: Raspberry Pi Zero 2 W + Kulp K2-Pi0 hat, battery powered, at 192.168.25.111
 - **Role**: standalone FPP instance — it is its own master, no multisync remote involved
-- **Pixel setup**: confirm pixel count and **absolute start channel** in FPP → Input/Output Setup →
-  Channel Outputs before scanning. Do NOT assume 9004 — that was the old master's
-  channel map, and a standalone K2-Pi0 numbers its own outputs.
+- **Pixel setup**: **start channel 1** — standalone, so the K2-Pi0's own outputs start at
+  the bottom of the channel range. This is also the `cfg-start` default in index.html,
+  so the Setup tab needs no change. (The old 9004 was specific to the Debian master's
+  channel map; it does not apply here.)
+  Verified: at start channel 1, `FPPOutput.pixel_on` emits pixel 0 → `1-3`,
+  pixel 1 → `4-6`, pixel N → `(1+3N)-(3+3N)`. Clean RGB triplets, no off-by-one.
 - **Scan delay**: the Setup tab's delay field defaults to 0.15s, which was tuned to let
   multisync propagate to a remote. Standalone has no propagation hop, so this can go
   lower (~0.05–0.10s) for noticeably faster scans if detection stays reliable.
@@ -76,8 +79,8 @@ Filed issues cover:
    string's channel range, RGB Single Color. If nothing lights here, it's wiring or
    channel config, not BlinkyMap. (Cost us a session once — it was a bad pigtail.)
 1. Open FPP UI → navigate to BlinkyMap (or go direct to `https://<fpp-ip>/plugin/blinkymap/`)
-2. Setup tab: enter FPP IP, pixel count, and the absolute start channel read from
-   Channel Outputs for that rig, then save & connect
+2. Setup tab: enter FPP IP and pixel count; start channel is 1 on FPP-Test (the
+   field's default) and 9004 on the legacy master. Save & connect.
 3. Open camera, check green camera status bar
 4. Scan tab: set angle/distance/height, start session — verify pixels counted > 0
 5. After scan: check expandable session card shows per-pixel detail
