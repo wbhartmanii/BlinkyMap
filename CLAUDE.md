@@ -24,19 +24,39 @@ BlinkyMap is an FPP (Falcon Player) plugin that automatically builds a 3D xLight
 - **Asset cache busting** via `?v=N` query strings on CSS/JS/HTML. Increment `v=` when deploying to FPP (FPP caches aggressively).
 
 ## Deployment Environment
+
+### Test platform (primary) — `FPP-Test`
+- **Host**: Raspberry Pi Zero 2 W + Kulp K2-Pi0 hat, battery powered, at 192.168.25.111
+- **Role**: standalone FPP instance — it is its own master, no multisync remote involved
+- **Pixel setup**: confirm pixel count and **absolute start channel** in FPP → Input/Output Setup →
+  Channel Outputs before scanning. Do NOT assume 9004 — that was the old master's
+  channel map, and a standalone K2-Pi0 numbers its own outputs.
+- **Scan delay**: the Setup tab's delay field defaults to 0.15s, which was tuned to let
+  multisync propagate to a remote. Standalone has no propagation hop, so this can go
+  lower (~0.05–0.10s) for noticeably faster scans if detection stays reliable.
+
+### Legacy two-box rig (kept for multisync regression testing)
 - **FPP Master**: Debian 12 at 192.168.25.207
 - **FPP Remote**: Raspberry Pi Zero (K2-Pi0) at 192.168.25.204
 - **Pixel setup**: 50 pixels, port 1, starting channel 9004, FPP multisync enabled
+
+### Operating notes (any host)
 - **Server restart**: `sudo pkill -f blinkymap_server` (www/index.php auto-restarts on next page load)
-- **Logs**: `/tmp/blinkymap_server.log` on FPP master
+- **Logs**: `/tmp/blinkymap_server.log` on whichever FPP box serves the plugin
+- The plugin itself is host-agnostic — the FPP IP is entered in the Setup tab and
+  `FPPOutput`/`E131Output` are chosen by auto-probing `/api/fppd/status`. No code
+  change is needed to move between test rigs.
 
 ## FPP API Notes
 - Light individual pixels: `POST /api/command` with `{"command":"Test Start","multisyncCommand":true,"args":["Pixel","1","<startCh>","<pixelIdx>",...]}`
 - Stop: `POST /api/command` with `{"command":"Test Stop","multisyncCommand":true,"args":[]}`
 - FPP channels are 1-indexed and absolute (not per-port). Starting channel 9004 means pixel 0 = channel 9004, pixel 1 = channel 9005 (for RGB: channels 9004-9006 for pixel 0).
+- `multisyncCommand: true` is safe on a standalone instance — FPP applies the test
+  locally and broadcasts to zero remotes. No need to special-case single-box rigs.
 
 ## Development Branch
-All new work goes on `claude/blinkymap-3d-modeling-J34d4`, then merges to `main`.
+Current working branch: `claude/fpp-test-platform-setup-w1kk02`, then merges to `main`.
+(Previous branch, now merged: `claude/blinkymap-3d-modeling-J34d4`.)
 
 ## Known Issues / GitHub Issues
 See https://github.com/wbhartmanii/BlinkyMap/issues for the current list.
@@ -52,8 +72,12 @@ Filed issues cover:
 - 3D model updates incrementally, doesn't wait for 100% detection
 
 ## Testing Checklist
+0. Confirm the string lights at all first: FPP UI → **Status/Control → Test**, pick the
+   string's channel range, RGB Single Color. If nothing lights here, it's wiring or
+   channel config, not BlinkyMap. (Cost us a session once — it was a bad pigtail.)
 1. Open FPP UI → navigate to BlinkyMap (or go direct to `https://<fpp-ip>/plugin/blinkymap/`)
-2. Setup tab: enter FPP IP, pixel count (50), start channel (9004), save & connect
+2. Setup tab: enter FPP IP, pixel count, and the absolute start channel read from
+   Channel Outputs for that rig, then save & connect
 3. Open camera, check green camera status bar
 4. Scan tab: set angle/distance/height, start session — verify pixels counted > 0
 5. After scan: check expandable session card shows per-pixel detail
