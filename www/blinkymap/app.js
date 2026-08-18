@@ -79,10 +79,13 @@ let lastSuggestion  = null;
 let units           = "m";   // "m" or "ft"
 
 // ── Unit helpers ──────────────────────────────────────────────────────────────
+// Form fields hold values in the CURRENTLY SELECTED display units, never
+// metres. The server always speaks metres. Convert at every boundary.
+function fromMeters(meters) {
+  return units === "ft" ? meters * 3.28084 : meters;
+}
 function formatDist(meters) {
-  return units === "ft"
-    ? `${(meters * 3.28084).toFixed(1)} ft`
-    : `${meters.toFixed(1)} m`;
+  return `${fromMeters(meters).toFixed(1)} ${units}`;
 }
 function toMeters(val) {
   return units === "ft" ? val / 3.28084 : val;
@@ -484,7 +487,11 @@ function showSuggestion(msg) {
 btnUseSugg.addEventListener("click", () => {
   if (!lastSuggestion) return;
   sessAngle.value = lastSuggestion.angle;
-  sessDist.value  = lastSuggestion.distance;
+  // lastSuggestion.distance is metres from the server; the field is in display
+  // units. Writing it raw shrank the distance by 3.28x on every use — and since
+  // the server suggests the MEDIAN of existing session distances, each use
+  // dragged the next suggestion down too, spiralling toward zero.
+  sessDist.value  = fromMeters(lastSuggestion.distance).toFixed(2);
   // Scroll to top of Scan tab so user sees the form
   document.getElementById("tab-scan").scrollTo({ top: 0, behavior: "smooth" });
 });
