@@ -122,11 +122,18 @@ async function onMessage(msg) {
         await sleep(80);
         const result = detectLED(camPreview, camCanvas, bgImageData, 25);
         drawDiff(result);
-        if (result.found && (result.purity ?? 1) < 0.5) {
+        // Live feedback so the confidence gate can be judged against reality.
+        if (!result.found) {
+          setCamStatus(`Pixel ${idx + 1}: not visible`, "cam-status-off");
+        } else if (result.conf < minConf) {
           setCamStatus(
-            `Pixel ${idx + 1}: stray light in frame (purity ` +
-            `${Math.round((result.purity ?? 1) * 100)}%) — marker may be off`,
-            "cam-status-bg");
+            `Pixel ${idx + 1}: rejected — conf ${result.conf.toFixed(2)} ` +
+            `(sparse ${result.sparsity.toFixed(2)} · compact ` +
+            `${result.compactness.toFixed(2)} · unique ${result.uniqueness.toFixed(2)})`,
+            "cam-status-off");
+        } else {
+          setCamStatus(`Pixel ${idx + 1}: seen — conf ${result.conf.toFixed(2)}`,
+                       "cam-status-on");
         }
         if (result.found && result.conf >= minConf) {
           send({ type: "detection", index: idx, cx: result.cx, cy: result.cy, conf: result.conf });
@@ -351,8 +358,9 @@ function drawDiff(result) {
 
   // Purity is the share of lit energy inside the detection window; a low value
   // means other bright things were in frame, so flag the reading as suspect.
-  const clean = (result.purity ?? 1) >= 0.5;
-  ctx.strokeStyle = clean ? "#69f0ae" : "#ffee58";
+  // Green = accepted, yellow = seen but below the confidence gate.
+  const accepted = (result.conf ?? 0) >= minConf;
+  ctx.strokeStyle = accepted ? "#69f0ae" : "#ffee58";
   ctx.lineWidth = 2;
   ctx.beginPath(); ctx.arc(x, y, 12, 0, Math.PI * 2); ctx.stroke();
   ctx.beginPath();
