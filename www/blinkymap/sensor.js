@@ -13,6 +13,7 @@
 import { openCamera, captureBackground, detectLED } from "./camera.js";
 import { Compass, angleDelta } from "./compass.js";
 
+export const BUILD = "v25";
 const WS_URL = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/blinkymap-ws`;
 
 const $ = (id) => document.getElementById(id);
@@ -364,45 +365,37 @@ btnStopScan.addEventListener("click", () => {
 
 // ── Detection marker, drawn over the live preview ─────────────────────────────
 function drawDiff(result) {
-  if (!camOverlay || !camPreview.videoWidth) return;
-  // Match the overlay's backing store to its displayed size so the marker lands
-  // exactly where the LED appears, independent of CSS scaling.
-  const rect = camPreview.getBoundingClientRect();
-  if (camOverlay.width !== rect.width || camOverlay.height !== rect.height) {
-    camOverlay.width  = rect.width;
-    camOverlay.height = rect.height;
+  if (!camOverlay || !camWidth) return;
+  // Backing store IS the camera frame. CSS applies the same object-fit as the
+  // video, so the browser places this canvas pixel-for-pixel over the preview
+  // and detector coordinates can be drawn verbatim.
+  if (camOverlay.width !== camWidth || camOverlay.height !== camHeight) {
+    camOverlay.width  = camWidth;
+    camOverlay.height = camHeight;
   }
   const ctx = camOverlay.getContext("2d");
-  ctx.clearRect(0, 0, camOverlay.width, camOverlay.height);
+  ctx.clearRect(0, 0, camWidth, camHeight);
   if (!result || !result.found) return;
 
-  // The video is letterboxed inside the box by object-fit: contain, so the
-  // frame does NOT map 1:1 onto the overlay. Reproduce the same fit to place
-  // the marker: uniform scale, then centre the leftover space. Assuming a 1:1
-  // map squished the marker and pushed it outside the visible image whenever
-  // the frame's aspect differed from the box's.
-  const scale = Math.min(camOverlay.width / camWidth, camOverlay.height / camHeight);
-  const offX  = (camOverlay.width  - camWidth  * scale) / 2;
-  const offY  = (camOverlay.height - camHeight * scale) / 2;
-  const x = offX + result.cx * scale;
-  const y = offY + result.cy * scale;
-
-  // Purity is the share of lit energy inside the detection window; a low value
-  // means other bright things were in frame, so flag the reading as suspect.
-  // Green = accepted, yellow = seen but below the confidence gate.
+  const x = result.cx, y = result.cy;
+  // Marker sized relative to the frame so it stays legible at any resolution.
+  const r = Math.max(6, Math.round(Math.min(camWidth, camHeight) * 0.025));
   const accepted = (result.conf ?? 0) >= minConf;
+
   ctx.strokeStyle = accepted ? "#69f0ae" : "#ffee58";
-  ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.arc(x, y, 12, 0, Math.PI * 2); ctx.stroke();
+  ctx.lineWidth = Math.max(2, Math.round(r / 5));
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke();
   ctx.beginPath();
-  ctx.moveTo(x - 18, y); ctx.lineTo(x - 5, y);
-  ctx.moveTo(x + 5, y);  ctx.lineTo(x + 18, y);
-  ctx.moveTo(x, y - 18); ctx.lineTo(x, y - 5);
-  ctx.moveTo(x, y + 5);  ctx.lineTo(x, y + 18);
+  ctx.moveTo(x - r * 1.6, y); ctx.lineTo(x - r * 0.5, y);
+  ctx.moveTo(x + r * 0.5, y); ctx.lineTo(x + r * 1.6, y);
+  ctx.moveTo(x, y - r * 1.6); ctx.lineTo(x, y - r * 0.5);
+  ctx.moveTo(x, y + r * 0.5); ctx.lineTo(x, y + r * 1.6);
   ctx.stroke();
 }
 
 // First run: setup is the only thing to do, so lead with it.
 compassFallback.style.display = "none";
 setSetupOpen(true);
+hudLabel.title = BUILD;
+document.getElementById("build-tag").textContent = BUILD;
 connect();

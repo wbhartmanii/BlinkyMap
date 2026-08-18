@@ -99,6 +99,8 @@ if [ -d /etc/apache2/conf-available ]; then
 
     a2enmod proxy proxy_http proxy_wstunnel >/dev/null 2>&1 || true
 
+    a2enmod headers >/dev/null 2>&1 || true
+
     cat > "$CONF" <<APACHECONF
 # Proxy WebSocket at same-origin path so FPP's CSP 'self' allows it
 ProxyPass /blinkymap-ws ws://127.0.0.1:8765
@@ -112,6 +114,14 @@ Alias /plugin/${PLUGIN_NAME} ${PLUGIN_DIR}/www
     DirectoryIndex index.php index.html
     <FilesMatch "\\.php\$">
         SetHandler "proxy:unix:${PHP_SOCK}|fcgi://localhost"
+    </FilesMatch>
+    # FPP serves static assets with 'max-age=31536000, immutable'. That is fine
+    # for the query-versioned JS and CSS, but fatal for the HTML that names those
+    # versions: a cached page keeps requesting last week's ?v= forever, and the
+    # user tests old code no matter how often they reload.
+    <FilesMatch "\\.html\$">
+        Header set Cache-Control "no-store, no-cache, must-revalidate, max-age=0"
+        Header set Pragma "no-cache"
     </FilesMatch>
 </Directory>
 APACHECONF

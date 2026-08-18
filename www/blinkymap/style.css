@@ -485,7 +485,14 @@ body.sensor-body {
 /* contain, not cover: the operator must see the entire frame the detector is
    searching, and a cropped preview makes the marker's position unverifiable. */
 #cam-wrap video  { width: 100%; height: 100%; object-fit: contain; display: block; }
-#cam-wrap canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+/* The overlay carries the video's intrinsic pixel dimensions and is laid out
+   with the SAME object-fit, so the browser letterboxes both identically and
+   marker coordinates need no conversion at all. Mirroring object-fit maths in
+   JS was a second source of truth and drifted from the CSS. */
+#cam-wrap canvas {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: contain; pointer-events: none;
+}
 #cam-placeholder {
   position: absolute; inset: 0; display: flex;
   align-items: center; justify-content: center;
@@ -544,3 +551,4 @@ body.sensor-body #last-result { margin: 0.4rem 0 0; font-size: 0.78rem; }
 .inline-field input[type="number"] { padding: 8px 10px; }
 #setup-strip .slider-hint { margin: 0.3rem 0 0; font-size: 0.72rem; }
 #setup-strip label { margin-bottom: 0; }
+#build-tag { font-size: 0.62rem; color: #6a6a90; letter-spacing: 0.03em; }
