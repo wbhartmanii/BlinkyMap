@@ -22,6 +22,16 @@ BlinkyMap is an FPP (Falcon Player) plugin that automatically builds a 3D xLight
 - **WebSocket proxy** through Apache at `/blinkymap-ws → ws://127.0.0.1:8765` satisfies FPP's same-origin CSP.
 - **HTTPS required** for `getUserMedia` (camera) in all modern browsers. The install script generates a self-signed cert; users accept the browser warning once.
 - **Asset cache busting** via `?v=N` query strings on CSS/JS/HTML. Increment `v=` when deploying to FPP (FPP caches aggressively).
+- **Split control/camera across devices works unmodified** (verified 2026-08-17).
+  `pixel_on` / `capture_background` are broadcast to every client, and a
+  `detection` is accepted from any of them, so a laptop can drive the UI while
+  a phone supplies the camera. A camera-less client replies `no_detection`,
+  which the server drops rather than queues — the same choice that fixed the
+  two-tab race is what makes this safe. Tested with a client sending instant
+  `no_detection` alongside one sending delayed `detection`: 6/6 counted from
+  the camera client. Caveats: only ONE client may have a camera open (two would
+  race, first-write-wins), and the phone must not sleep — mobile browsers
+  suspend JS on screen lock, which looks identical to "pixel not visible".
 
 ## Deployment Environment
 
