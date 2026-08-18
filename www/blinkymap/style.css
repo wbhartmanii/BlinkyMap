@@ -532,3 +532,13 @@ body.sensor-body #cam-status-bar {
 .progress-foot span { font-size: 0.8rem; color: #9a9ac0; }
 .progress-foot button { margin: 0; padding: 0.4rem 0.9rem; }
 body.sensor-body #last-result { margin: 0.4rem 0 0; font-size: 0.78rem; }
+
+/* Overrides for the compact sensor screen. The shared button/label/input rules
+   are sized for the scrolling control UI and are too tall to fit a phone
+   alongside a camera preview. */
+#setup-strip .btn-primary,
+#setup-strip .btn-secondary { padding: 9px 12px; font-size: 0.88rem; }
+.inline-field { flex-direction: row !important; margin-bottom: 0 !important; }
+.inline-field input[type="number"] { padding: 8px 10px; }
+#setup-strip .slider-hint { margin: 0.3rem 0 0; font-size: 0.72rem; }
+#setup-strip label { margin-bottom: 0; }
