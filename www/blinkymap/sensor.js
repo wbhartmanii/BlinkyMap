@@ -104,10 +104,13 @@ async function onMessage(msg) {
   switch (msg.type) {
     case "capture_background":
       if (camPreview.srcObject) {
-        bgImageData = captureBackground(camPreview, camCanvas);
-        setCamStatus("Background captured — scanning…", "cam-status-bg");
+        setCamStatus("Capturing baseline (hold still)…", "cam-status-bg");
+        bgImageData = await captureBackground(camPreview, camCanvas);
+        setCamStatus("Baseline captured — scanning…", "cam-status-bg");
+        send({ type: "background_ready" });
       } else {
         setCamStatus("Camera not open — detections will be skipped", "cam-status-off");
+        send({ type: "background_ready" });   // don't stall the scan
       }
       break;
 

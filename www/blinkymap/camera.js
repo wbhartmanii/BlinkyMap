@@ -30,11 +30,36 @@ export async function openCamera(videoEl, canvasEl) {
   return { width, height };
 }
 
-/** Grab the current video frame as ImageData (dark background). */
-export function captureBackground(videoEl, canvasEl) {
+/**
+ * Grab a baseline frame with every pixel off.
+ *
+ * Takes the per-channel MAXIMUM across several frames rather than a single
+ * snapshot. A steady light subtracts out of a single frame fine, but anything
+ * that blinks or flickers — a controller status LED, a TV, a phone charger —
+ * is dark in the one frame captured and then appears as a bright positive in
+ * the difference later, which the peak-finder will happily lock onto. Baking
+ * each source in at its brightest guarantees it can never produce a positive
+ * difference, at the cost of slightly desensitising those regions.
+ */
+export async function captureBackground(videoEl, canvasEl, frames = 8, gapMs = 60) {
   const ctx = canvasEl.getContext("2d", { willReadFrequently: true });
-  ctx.drawImage(videoEl, 0, 0, canvasEl.width, canvasEl.height);
-  return ctx.getImageData(0, 0, canvasEl.width, canvasEl.height);
+  const W = canvasEl.width, H = canvasEl.height;
+
+  ctx.drawImage(videoEl, 0, 0, W, H);
+  const acc = ctx.getImageData(0, 0, W, H);
+  const a = acc.data;
+
+  for (let f = 1; f < frames; f++) {
+    await new Promise(r => setTimeout(r, gapMs));
+    ctx.drawImage(videoEl, 0, 0, W, H);
+    const cur = ctx.getImageData(0, 0, W, H).data;
+    for (let i = 0; i < a.length; i += 4) {
+      if (cur[i]     > a[i])     a[i]     = cur[i];
+      if (cur[i + 1] > a[i + 1]) a[i + 1] = cur[i + 1];
+      if (cur[i + 2] > a[i + 2]) a[i + 2] = cur[i + 2];
+    }
+  }
+  return acc;
 }
 
 /**

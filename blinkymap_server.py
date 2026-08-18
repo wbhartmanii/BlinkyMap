@@ -720,6 +720,9 @@ class BlinkyServer:
         # Per-pixel detection response queue — fed by incoming "detection"/"no_detection"
         self._detection_queue: asyncio.Queue = asyncio.Queue()
 
+        # Signalled by the sensor once its multi-frame baseline is captured.
+        self._bg_ready: asyncio.Event = asyncio.Event()
+
     async def broadcast(self, msg: dict, role: Optional[str] = None):
         targets = [c for c, r in self.clients.items() if role is None or r == role]
         if targets:
@@ -843,6 +846,9 @@ class BlinkyServer:
                 self.heading_reference = self.sensor_heading
                 log.info("Heading reference set to %.1f deg", self.heading_reference)
             await self.broadcast(self._sensor_summary())
+
+        elif t == "background_ready":
+            self._bg_ready.set()
 
         elif t == "clear_reference":
             self.heading_reference = None
@@ -1051,9 +1057,16 @@ class BlinkyServer:
                 except asyncio.QueueEmpty:
                     break
 
-            # Request background capture
+            # Request background capture and wait for the sensor to confirm.
+            # The baseline is now several frames, so a fixed sleep would race it
+            # and the first pixels would be scanned with no baseline at all.
+            self._bg_ready.clear()
             await self.broadcast({"type": "capture_background"})
-            await asyncio.sleep(0.5)
+            try:
+                await asyncio.wait_for(self._bg_ready.wait(), timeout=8.0)
+                log.info("Baseline captured by sensor")
+            except asyncio.TimeoutError:
+                log.warning("No background_ready within 8s — scanning anyway")
 
             for idx in range(total):
                 await loop.run_in_executor(None, lambda i=idx: output.pixel_on(i))
