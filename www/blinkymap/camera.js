@@ -122,24 +122,48 @@ export function detectLED(videoEl, canvasEl, bgImageData, threshold = 30,
   const litFrac  = litCount / N;
   const sparsity = Math.max(0, Math.min(1, 1 - litFrac / 0.08));
 
-  // Pass 2: centroid in a window on the peak, plus blob area and rival peak.
+  // Pass 2: measure how far the target's own blob extends, in rings of `rad`
+  // around the peak. A bright LED saturates, so its core holds many pixels at
+  // the identical maximum value; without measuring the extent, that halo is
+  // indistinguishable from a rival light source and every strong detection
+  // scores zero uniqueness against itself.
   const px = peakIdx % W, py = (peakIdx / W) | 0;
   const rad = Math.max(10, Math.round(Math.min(W, H) * windowFrac));
-  const rad2 = rad * rad;
-  const half = peakLum * 0.5;
+  const BANDS = 24;
+  const bandMax = new Float32Array(BANDS);
 
-  let sumW = 0, sumX = 0, sumY = 0, blob = 0, rival = 0;
   for (let y = 0; y < H; y++) {
     const dy = y - py;
     for (let x = 0; x < W; x++) {
       const lum = diff[y * W + x];
       if (lum <= 0) continue;
       const dx = x - px;
-      const inWin = dx * dx + dy * dy <= rad2;
-      if (inWin) {
+      const b = Math.min(BANDS - 1, Math.floor(Math.sqrt(dx * dx + dy * dy) / rad));
+      if (lum > bandMax[b]) bandMax[b] = lum;
+    }
+  }
+
+  // The blob ends at the first ring whose brightest pixel has fallen to half.
+  let blobBands = 1;
+  while (blobBands < BANDS && bandMax[blobBands] >= peakLum * 0.5) blobBands++;
+
+  const winR  = blobBands * rad;          // centroid window covers the whole blob
+  const exclR = winR * 2;                 // rivals must be clear of it
+  const winR2 = winR * winR, exclR2 = exclR * exclR;
+  const half  = peakLum * 0.5;
+
+  // Pass 3: centroid over the blob, area of its bright core, brightest rival.
+  let sumW = 0, sumX = 0, sumY = 0, rival = 0;
+  for (let y = 0; y < H; y++) {
+    const dy = y - py;
+    for (let x = 0; x < W; x++) {
+      const lum = diff[y * W + x];
+      if (lum <= 0) continue;
+      const dx = x - px;
+      const d2 = dx * dx + dy * dy;
+      if (d2 <= winR2) {
         sumW += lum; sumX += x * lum; sumY += y * lum;
-        if (lum >= half) blob++;
-      } else if (lum > rival) {
+      } else if (d2 > exclR2 && lum > rival) {
         rival = lum;
       }
     }
@@ -147,9 +171,11 @@ export function detectLED(videoEl, canvasEl, bgImageData, threshold = 30,
 
   if (sumW < 1e-6) return { found: false, reason: "no energy in window" };
 
-  // A point source covers a tiny share of frame; 1% is already generous.
-  const areaFrac    = blob / N;
-  const compactness = Math.max(0, Math.min(1, 1 - areaFrac / 0.01));
+  // Compactness from the falloff profile, not absolute area. A point source
+  // halves within one ring however close it is; diffuse glow stays bright over
+  // many. An area threshold would reject a legitimate LED simply for being
+  // photographed from close range.
+  const compactness = Math.max(0, Math.min(1, 1 - (blobBands - 1) / 4));
 
   // Only penalise a rival bright enough to have been a plausible alternative.
   // A neighbour glowing at a third of the peak is normal on any real prop and

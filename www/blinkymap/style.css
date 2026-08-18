@@ -444,7 +444,6 @@ input[type="range"]::-moz-range-thumb {
   text-align: center; font-size: 0.8rem; color: #7a7aa0;
   margin: 0.35rem 0 0.6rem;
 }
-.sensor-body #cam-preview { max-height: 34vh; }
 
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -477,22 +476,33 @@ body.sensor-body {
 
 /* Stage grows/shrinks; min-height:0 is what lets it actually shrink in flex */
 #stage { flex: 1 1 auto; min-height: 0; position: relative; padding: 0.4rem 0.7rem; }
-#cam-wrap {
-  position: relative; width: 100%; height: 100%;
+/* Absolutely positioned rather than height:100%: a percentage height resolved
+   through a flex chain is unreliable, and when it collapses the video shrinks
+   while the overlay does not. */
+.sensor-body #cam-wrap {
+  position: absolute; inset: 0.4rem 0.7rem;
   border-radius: 10px; overflow: hidden;
   background: #0d0d14; border: 1px solid #2a2a45;
 }
-/* contain, not cover: the operator must see the entire frame the detector is
-   searching, and a cropped preview makes the marker's position unverifiable. */
-#cam-wrap video  { width: 100%; height: 100%; object-fit: contain; display: block; }
-/* The overlay carries the video's intrinsic pixel dimensions and is laid out
-   with the SAME object-fit, so the browser letterboxes both identically and
-   marker coordinates need no conversion at all. Mirroring object-fit maths in
-   JS was a second source of truth and drifted from the CSS. */
-#cam-wrap canvas {
-  position: absolute; inset: 0; width: 100%; height: 100%;
-  object-fit: contain; pointer-events: none;
+
+/* Video and overlay are pinned to the SAME rectangle and given the same
+   object-fit. The overlay's backing store is the camera's intrinsic frame, so
+   the browser letterboxes both identically and detector coordinates need no
+   conversion. Anything that sizes one differently from the other — such as the
+   max-height that used to cap the video — silently separates the marker from
+   the image, which is exactly what happened before.
+   The long-hand resets are deliberate: shared rules elsewhere set display,
+   margin and max-height on #cam-preview and outrank a bare element selector. */
+.sensor-body #cam-wrap video,
+.sensor-body #cam-wrap canvas {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  max-width: none; max-height: none;
+  margin: 0; border-radius: 0;
+  object-fit: contain;
+  display: block;
 }
+.sensor-body #cam-wrap canvas { pointer-events: none; }
 #cam-placeholder {
   position: absolute; inset: 0; display: flex;
   align-items: center; justify-content: center;
