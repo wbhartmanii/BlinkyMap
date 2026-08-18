@@ -521,7 +521,9 @@ function updatePixelList(pixels) {
   for (const p of sorted) {
     const row = document.createElement("div");
     row.className = "pixel-row";
-    const conf  = p.position != null ? `${Math.round((p.confidence ?? 0) * 100)}%` : "–";
+    // Server sends x/y/z, never a `position` key — testing p.position made
+    // this column render "–" for every pixel.
+    const conf  = p.x != null ? `${Math.round((p.confidence ?? 0) * 100)}%` : "–";
     const seen  = p.sessions?.length ?? 0;
     row.innerHTML = `
       <span>${p.index + 1}</span>
