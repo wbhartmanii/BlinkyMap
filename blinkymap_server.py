@@ -699,6 +699,21 @@ class BlinkyServer:
         try:
             # Send current state summary
             await ws.send(json.dumps({"type": "status", "message": "BlinkyMap ready"}))
+
+            # Replay existing model state so a reconnecting or second client
+            # (e.g. the laptop when the phone holds the camera) sees the model
+            # that has already been built, instead of an empty viewer.
+            if self.model.results:
+                await ws.send(json.dumps({
+                    "type": "model", "pixels": self.model.to_json_pixels(),
+                }))
+                await ws.send(json.dumps({
+                    "type": "confidence", **self.model.model_confidence(),
+                }))
+                await ws.send(json.dumps({
+                    "type": "next_suggestion",
+                    **suggest_next_angle(self.model, self.model.sessions),
+                }))
             async for raw in ws:
                 await self._handle_message(ws, raw)
         except Exception as e:
