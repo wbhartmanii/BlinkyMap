@@ -42,7 +42,8 @@ const scanHint    = $("scan-hint");
 const progressBlock = $("scan-progress-block");
 const progressBar   = $("scan-progress-bar");
 const progressLabel = $("scan-progress-label");
-const diffCanvas    = $("diff-canvas");
+const camOverlay    = $("cam-overlay");
+const camWrap       = document.getElementById("cam-wrap");
 const btnStopScan   = $("btn-stop-scan");
 const lastResult    = $("last-result");
 
@@ -118,6 +119,12 @@ async function onMessage(msg) {
         await sleep(80);
         const result = detectLED(camPreview, camCanvas, bgImageData, 25);
         drawDiff(result);
+        if (result.found && (result.purity ?? 1) < 0.5) {
+          setCamStatus(
+            `Pixel ${idx + 1}: stray light in frame (purity ` +
+            `${Math.round((result.purity ?? 1) * 100)}%) — marker may be off`,
+            "cam-status-bg");
+        }
         if (result.found && result.conf >= minConf) {
           send({ type: "detection", index: idx, cx: result.cx, cy: result.cy, conf: result.conf });
         } else {
@@ -179,6 +186,7 @@ btnOpenCamera.addEventListener("click", async () => {
   try {
     const dim = await openCamera(camPreview, camCanvas);
     camWidth = dim.width; camHeight = dim.height;
+    camWrap.classList.add("live");
     setCamStatus(`Camera open: ${camWidth}x${camHeight}`, "cam-status-on");
     btnOpenCamera.textContent = "Restart Camera";
   } catch (e) {
@@ -319,20 +327,37 @@ btnStopScan.addEventListener("click", () => {
   progressBlock.style.display = "none";
 });
 
-// ── Diff preview ──────────────────────────────────────────────────────────────
+// ── Detection marker, drawn over the live preview ─────────────────────────────
 function drawDiff(result) {
-  if (!diffCanvas || !bgImageData) return;
-  const w = 160, h = Math.round(160 * (camHeight / camWidth));
-  diffCanvas.width = w; diffCanvas.height = h;
-  const ctx = diffCanvas.getContext("2d");
-  ctx.drawImage(camPreview, 0, 0, w, h);
-  if (result && result.found) {
-    ctx.strokeStyle = "#69f0ae";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(result.cx * w / camWidth, result.cy * h / camHeight, 8, 0, Math.PI * 2);
-    ctx.stroke();
+  if (!camOverlay || !camPreview.videoWidth) return;
+  // Match the overlay's backing store to its displayed size so the marker lands
+  // exactly where the LED appears, independent of CSS scaling.
+  const rect = camPreview.getBoundingClientRect();
+  if (camOverlay.width !== rect.width || camOverlay.height !== rect.height) {
+    camOverlay.width  = rect.width;
+    camOverlay.height = rect.height;
   }
+  const ctx = camOverlay.getContext("2d");
+  ctx.clearRect(0, 0, camOverlay.width, camOverlay.height);
+  if (!result || !result.found) return;
+
+  const sx = camOverlay.width  / camWidth;
+  const sy = camOverlay.height / camHeight;
+  const x  = result.cx * sx;
+  const y  = result.cy * sy;
+
+  // Purity is the share of lit energy inside the detection window; a low value
+  // means other bright things were in frame, so flag the reading as suspect.
+  const clean = (result.purity ?? 1) >= 0.5;
+  ctx.strokeStyle = clean ? "#69f0ae" : "#ffee58";
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(x, y, 12, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x - 18, y); ctx.lineTo(x - 5, y);
+  ctx.moveTo(x + 5, y);  ctx.lineTo(x + 18, y);
+  ctx.moveTo(x, y - 18); ctx.lineTo(x, y - 5);
+  ctx.moveTo(x, y + 5);  ctx.lineTo(x, y + 18);
+  ctx.stroke();
 }
 
 // Show manual entry until the compass is proven to work.
