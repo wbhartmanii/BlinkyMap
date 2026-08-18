@@ -1,5 +1,9 @@
 /**
- * app.js — BlinkyMap FPP Plugin SPA orchestrator.
+ * control.js — the laptop half of BlinkyMap.
+ *
+ * Owns controller setup, the session list, the 3D model and export. It has no
+ * camera and no detection code: the server rejects detections from a client
+ * that declared role "control", so a stray webcam here cannot race the sensor.
  *
  * State machine:  idle → configured → scanning → done
  *
@@ -7,7 +11,6 @@
  * Drives the camera module for detection and the Three.js viewer for 3D.
  */
 
-import { openCamera, captureBackground, detectLED } from "./camera.js";
 import { Viewer3D } from "./viewer3d.js";
 
 // ── WebSocket URL — proxied through Apache at same origin to satisfy CSP ─────
@@ -31,15 +34,7 @@ const controllerStatus   = document.getElementById("controller-status");
 const btnTestBlink       = document.getElementById("btn-test-blink");
 const btnStopTest    = document.getElementById("btn-stop-test");
 const testResultMsg  = document.getElementById("test-result-msg");
-const btnOpenCamera  = document.getElementById("btn-open-camera");
-const camStatusBar   = document.getElementById("cam-status-bar");
-const camPreview     = document.getElementById("cam-preview");
-const camCanvas      = document.getElementById("cam-canvas");
 
-const sessAngle      = document.getElementById("sess-angle");
-const sessDist       = document.getElementById("sess-dist");
-const sessHeight     = document.getElementById("sess-height");
-const btnStartSess   = document.getElementById("btn-start-session");
 const scanBlock      = document.getElementById("scan-progress-block");
 const progressBar    = document.getElementById("scan-progress-bar");
 const progressLabel  = document.getElementById("scan-progress-label");
@@ -48,14 +43,11 @@ const suggCard       = document.getElementById("suggestion-card");
 const suggAngle      = document.getElementById("sugg-angle");
 const suggDist       = document.getElementById("sugg-dist");
 const suggReason     = document.getElementById("sugg-reason");
-const btnUseSugg     = document.getElementById("btn-use-suggestion");
 const sessionList    = document.getElementById("session-list");
 const confidencePct  = document.getElementById("confidence-pct");
 const confidenceGrade= document.getElementById("confidence-grade");
 const confidenceDet  = document.getElementById("confidence-detail");
 
-const diffCanvas     = document.getElementById("diff-canvas");
-const diffLabel      = document.getElementById("diff-label");
 const viewerContainer= document.getElementById("viewer-container");
 const pixelListEl    = document.getElementById("pixel-list");
 
@@ -68,9 +60,6 @@ const confidenceTip  = document.getElementById("confidence-tip");
 // ── App state ─────────────────────────────────────────────────────────────────
 let ws           = null;
 let viewer       = null;
-let bgImageData  = null;
-let camWidth     = 1280;
-let camHeight    = 720;
 let scanning     = false;
 let currentPixelIdx = -1;
 let sessions        = [];
@@ -113,6 +102,7 @@ function connect() {
 
   ws.onopen = () => {
     setIndicator("green");
+    send({ type: "hello", role: "control" });
     statusMsg("Connected to BlinkyMap server");
   };
 
@@ -152,46 +142,6 @@ async function handleServerMessage(msg) {
       statusMsg(msg.message);
       break;
 
-    case "capture_background":
-      if (camPreview.srcObject) {
-        bgImageData = captureBackground(camPreview, camCanvas);
-        camStatusBar.textContent = "Camera: background captured — scanning…";
-        camStatusBar.className   = "cam-status cam-status-bg";
-        statusMsg("Background captured");
-      } else {
-        camStatusBar.textContent = "Camera: not open — detections will be skipped";
-        camStatusBar.className   = "cam-status cam-status-off";
-      }
-      break;
-
-    case "pixel_on":
-      currentPixelIdx = msg.index;
-      if (bgImageData && camPreview.srcObject) {
-        await sleep(80);
-        const result = detectLED(camPreview, camCanvas, bgImageData, 25);
-        // Draw amplified diff so user can see what the camera sees
-        drawDiff(camCanvas, bgImageData, msg.index, result);
-        const minConf = parseInt(cfgMinConf.value) / 100;
-        if (result.found && result.conf >= minConf) {
-          send({
-            type: "detection",
-            index: msg.index,
-            cx:   result.cx,
-            cy:   result.cy,
-            conf: result.conf,
-          });
-        } else {
-          send({ type: "no_detection", index: msg.index });
-        }
-      } else {
-        send({ type: "no_detection", index: msg.index });
-      }
-      break;
-
-    case "pixel_off":
-      currentPixelIdx = -1;
-      break;
-
     case "progress":
       updateProgress(msg.index + 1, msg.total);
       break;
@@ -202,10 +152,6 @@ async function handleServerMessage(msg) {
       addSessionCard(msg.session, msg.detected, msg.total, msg.detections || {},
                      msg.angle ?? 0, msg.distance ?? 2, msg.height ?? 1.5);
       statusMsg(`Session ${msg.session}: ${msg.detected}/${msg.total} detected`);
-      if (camPreview.srcObject) {
-        camStatusBar.textContent = `Camera active — ${msg.detected}/${msg.total} pixels detected last session`;
-        camStatusBar.className   = "cam-status " + (msg.detected > 0 ? "cam-status-on" : "cam-status-off");
-      }
       break;
 
     case "session_list":
@@ -224,6 +170,10 @@ async function handleServerMessage(msg) {
       latestPixels = msg.pixels;
       if (viewer) viewer.update(latestPixels);
       updatePixelList(latestPixels);
+      break;
+
+    case "sensor_status":
+      renderSensorStatus(msg);
       break;
 
     case "confidence":
@@ -274,6 +224,9 @@ function sendConfig() {
     start_ch:    parseInt(cfgStart.value),
     pixel_count: parseInt(cfgPixels.value),
     delay:       parseFloat(cfgDelay.value),
+    // Owned here, relayed by the server to the sensor that actually detects.
+    min_conf:    parseInt(cfgMinConf.value) / 100,
+    hfov_deg:    parseFloat(cfgFov.value),
   });
 }
 
@@ -331,13 +284,7 @@ unitToggle.addEventListener("click", e => {
   // Update label suffixes
   document.querySelectorAll(".unit-sfx").forEach(el => el.textContent = units);
 
-  // Convert distance/height input values
-  const factor = units === "ft" ? 3.28084 : 1 / 3.28084;
-  for (const el of [sessDist, sessHeight]) {
-    const v = parseFloat(el.value);
-    if (!isNaN(v)) el.value = (v * factor).toFixed(2);
-  }
-
+  // Distance/height inputs live on the sensor now; only cards need re-rendering.
   // Update existing session card positions
   document.querySelectorAll(".session-card[data-dist-m]").forEach(card => {
     card.querySelector(".sess-pos").textContent = sessionPosStr(
@@ -352,54 +299,7 @@ unitToggle.addEventListener("click", e => {
 });
 
 // ── Camera ────────────────────────────────────────────────────────────────────
-btnOpenCamera.addEventListener("click", async () => {
-  try {
-    const dim = await openCamera(camPreview, camCanvas);
-    camWidth  = dim.width;
-    camHeight = dim.height;
-    camPreview.style.display = "block";
-    camStatusBar.textContent = `Camera active (${camWidth}×${camHeight}) — ready to scan`;
-    camStatusBar.className   = "cam-status cam-status-on";
-    send({
-      type:     "set_fov",
-      hfov_deg: parseFloat(cfgFov.value),
-      width:    camWidth,
-      height:   camHeight,
-    });
-    statusMsg(`Camera open: ${camWidth}×${camHeight}`);
-  } catch (e) {
-    alert("Camera error: " + e.message);
-  }
-});
-
 // ── Session / Scan ────────────────────────────────────────────────────────────
-btnStartSess.addEventListener("click", () => {
-  if (scanning) { alert("Scan already running"); return; }
-
-  const angle    = parseFloat(sessAngle.value) || 0;
-  const distance = toMeters(parseFloat(sessDist.value)   || (units === "ft" ? 6.56 : 2.0));
-  const height   = toMeters(parseFloat(sessHeight.value) || (units === "ft" ? 4.92 : 1.5));
-
-  send({
-    type:     "set_session",
-    angle,
-    distance,
-    height,
-    hfov_deg: parseFloat(cfgFov.value),
-    img_width:  camWidth,
-    img_height: camHeight,
-  });
-
-  // Give server a tick to register session then start
-  setTimeout(() => {
-    send({ type: "start_scan" });
-    scanning = true;
-    progressBar.style.width = "0%";
-    progressLabel.textContent = `0 / ${cfgPixels.value}`;
-    scanBlock.style.display = "block";
-  }, 200);
-});
-
 btnStopScan.addEventListener("click", () => {
   send({ type: "stop_scan" });
   scanning = false;
@@ -484,17 +384,6 @@ function showSuggestion(msg) {
   suggCard.style.display = "block";
 }
 
-btnUseSugg.addEventListener("click", () => {
-  if (!lastSuggestion) return;
-  sessAngle.value = lastSuggestion.angle;
-  // lastSuggestion.distance is metres from the server; the field is in display
-  // units. Writing it raw shrank the distance by 3.28x on every use — and since
-  // the server suggests the MEDIAN of existing session distances, each use
-  // dragged the next suggestion down too, spiralling toward zero.
-  sessDist.value  = fromMeters(lastSuggestion.distance).toFixed(2);
-  // Scroll to top of Scan tab so user sees the form
-  document.getElementById("tab-scan").scrollTo({ top: 0, behavior: "smooth" });
-});
 
 function updateConfidence(msg) {
   const pct = Math.round((msg.overall ?? 0) * 100);
@@ -572,66 +461,29 @@ function triggerDownload(filename, content, mime) {
 // ── Utility ───────────────────────────────────────────────────────────────────
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-function drawDiff(srcCanvas, bgImageData, pixelIdx, result) {
-  const W = srcCanvas.width;
-  const H = srcCanvas.height;
-  if (!W || !H) return;
-
-  const srcCtx  = srcCanvas.getContext("2d", { willReadFrequently: true });
-  const litData = srcCtx.getImageData(0, 0, W, H);
-  const bg      = bgImageData.data;
-  const lit     = litData.data;
-
-  // Scale down 4× for the preview canvas
-  const scale  = 4;
-  const dW     = Math.floor(W / scale);
-  const dH     = Math.floor(H / scale);
-  diffCanvas.width  = dW;
-  diffCanvas.height = dH;
-
-  const dCtx  = diffCanvas.getContext("2d");
-  const imgD  = dCtx.createImageData(dW, dH);
-  const d     = imgD.data;
-
-  let peakLum = 0;
-  for (let dy = 0; dy < dH; dy++) {
-    for (let dx = 0; dx < dW; dx++) {
-      const sx = dx * scale;
-      const sy = dy * scale;
-      const si = (sy * W + sx) * 4;
-      const di = (dy * dW + dx) * 4;
-      const dr = Math.max(0, lit[si]   - bg[si]);
-      const dg = Math.max(0, lit[si+1] - bg[si+1]);
-      const db = Math.max(0, lit[si+2] - bg[si+2]);
-      const lum = 0.299 * dr + 0.587 * dg + 0.114 * db;
-      if (lum > peakLum) peakLum = lum;
-      // Amplify 4× so faint signals are visible
-      d[di]   = Math.min(255, dr * 4);
-      d[di+1] = Math.min(255, dg * 4);
-      d[di+2] = Math.min(255, db * 4);
-      d[di+3] = 255;
-    }
-  }
-  dCtx.putImageData(imgD, 0, 0);
-
-  // Draw crosshair if detected
-  if (result.found) {
-    dCtx.strokeStyle = "#69f0ae";
-    dCtx.lineWidth   = 1;
-    const cx = result.cx / scale;
-    const cy = result.cy / scale;
-    dCtx.beginPath();
-    dCtx.moveTo(cx - 8, cy); dCtx.lineTo(cx + 8, cy);
-    dCtx.moveTo(cx, cy - 8); dCtx.lineTo(cx, cy + 8);
-    dCtx.stroke();
-  }
-
-  const status = result.found
-    ? `Pixel ${pixelIdx + 1}: detected  conf=${(result.conf * 100).toFixed(0)}%  peak=${peakLum.toFixed(0)}`
-    : `Pixel ${pixelIdx + 1}: not found  peak=${peakLum.toFixed(0)}`;
-  diffLabel.textContent = status;
-  console.log("[BlinkyMap]", status);
-}
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 connect();
+
+// ── Sensor presence ───────────────────────────────────────────────────────────
+function renderSensorStatus(msg) {
+  const el = document.getElementById("sensor-status");
+  if (!el) return;
+  if (!msg.connected) {
+    el.className   = "cam-status cam-status-off";
+    el.textContent = "No sensor connected — open /sensor.html on your phone";
+    return;
+  }
+  const bits = [];
+  if (msg.angle !== null && msg.angle !== undefined) {
+    bits.push(`${Math.round(msg.angle)}° around model`);
+  } else if (msg.reference === null || msg.reference === undefined) {
+    bits.push("0° reference not set on phone");
+  }
+  if (msg.heading !== null && msg.heading !== undefined) {
+    bits.push(`heading ${Math.round(msg.heading)}°`);
+  }
+  if (msg.accuracy) bits.push(`±${Math.round(msg.accuracy)}°`);
+  el.className   = "cam-status cam-status-on";
+  el.textContent = "Sensor connected — " + (bits.join(" · ") || "waiting for compass");
+}

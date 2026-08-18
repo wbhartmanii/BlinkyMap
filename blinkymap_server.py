@@ -217,6 +217,9 @@ class ControllerConfig:
     inter_pixel_delay: float = 0.15
     pixel_color: Tuple[int, int, int] = (255, 255, 255)
     output_mode: str = "auto"    # "auto" | "fpp" | "e131"
+    # Detection settings: configured on the control UI, applied on the sensor.
+    min_conf: float = 0.5
+    hfov_deg: float = 60.0
 
 
 # ── Camera / session geometry ─────────────────────────────────────────────────
@@ -683,18 +686,56 @@ class BlinkyServer:
         self.current_session: Optional[SessionConfig] = None
         self.scan_task: Optional[asyncio.Task] = None
         self.test_task: Optional[asyncio.Task] = None
-        self.clients: Set[WebSocketServerProtocol] = set()
+        # ws -> role ("control" | "sensor" | "unknown"). Roles are declared by
+        # the client via a "hello" message; only sensors may report detections.
+        self.clients: Dict[WebSocketServerProtocol, str] = {}
+
+        # Latest pose reported by a sensor client (phone compass).
+        self.sensor_heading: Optional[float] = None      # raw compass degrees
+        self.sensor_accuracy: Optional[float] = None     # +/- degrees, if known
+        self.heading_reference: Optional[float] = None   # heading the user called 0 deg
 
         # Per-pixel detection response queue — fed by incoming "detection"/"no_detection"
         self._detection_queue: asyncio.Queue = asyncio.Queue()
 
-    async def broadcast(self, msg: dict):
-        if self.clients:
+    async def broadcast(self, msg: dict, role: Optional[str] = None):
+        targets = [c for c, r in self.clients.items() if role is None or r == role]
+        if targets:
             data = json.dumps(msg)
-            await asyncio.gather(*(c.send(data) for c in self.clients), return_exceptions=True)
+            await asyncio.gather(*(c.send(data) for c in targets), return_exceptions=True)
+
+    def _sensor_angle(self) -> Optional[float]:
+        """Compass heading converted to an angle around the model.
+
+        Aiming the camera at the prop means heading rotates degree-for-degree
+        with position around it, so a relative measurement against a reference
+        the user sets at their first position needs no true-north calibration
+        and cancels any constant magnetic bias.
+        """
+        if self.sensor_heading is None or self.heading_reference is None:
+            return None
+        return (self.sensor_heading - self.heading_reference) % 360.0
+
+    def _sensor_config(self) -> dict:
+        """Detection settings the sensor needs; owned by the control UI."""
+        return {
+            "type": "sensor_config",
+            "min_conf": self.config.min_conf,
+            "hfov_deg": self.config.hfov_deg,
+        }
+
+    def _sensor_summary(self) -> dict:
+        return {
+            "type": "sensor_status",
+            "connected": any(r == "sensor" for r in self.clients.values()),
+            "heading": self.sensor_heading,
+            "accuracy": self.sensor_accuracy,
+            "reference": self.heading_reference,
+            "angle": self._sensor_angle(),
+        }
 
     async def handler(self, ws: WebSocketServerProtocol):
-        self.clients.add(ws)
+        self.clients[ws] = "unknown"
         log.info("Client connected (%d total)", len(self.clients))
         try:
             # Send current state summary
@@ -743,8 +784,12 @@ class BlinkyServer:
         except Exception as e:
             log.debug("Client error: %s", e)
         finally:
-            self.clients.discard(ws)
+            self.clients.pop(ws, None)
             log.info("Client disconnected (%d total)", len(self.clients))
+            if not any(r == "sensor" for r in self.clients.values()):
+                self.sensor_heading = None
+                self.sensor_accuracy = None
+            await self.broadcast(self._sensor_summary(), role="control")
 
     async def _handle_message(self, ws: WebSocketServerProtocol, raw: str):
         try:
@@ -754,25 +799,60 @@ class BlinkyServer:
 
         t = msg.get("type")
 
-        if t == "set_config":
+        if t == "hello":
+            role = msg.get("role")
+            if role not in ("control", "sensor"):
+                role = "unknown"
+            self.clients[ws] = role
+            log.info("Client declared role=%s (%d total)", role, len(self.clients))
+            if role == "sensor":
+                await ws.send(json.dumps(self._sensor_config()))
+            await self.broadcast(self._sensor_summary(), role="control")
+
+        elif t == "pose":
+            # Sensor (phone) reporting compass heading. Ignored from anyone else.
+            if self.clients.get(ws) != "sensor":
+                return
+            h = msg.get("heading")
+            self.sensor_heading  = float(h) % 360.0 if h is not None else None
+            acc = msg.get("accuracy")
+            self.sensor_accuracy = float(acc) if acc is not None else None
+            if msg.get("set_reference") and self.sensor_heading is not None:
+                self.heading_reference = self.sensor_heading
+                log.info("Heading reference set to %.1f deg", self.heading_reference)
+            await self.broadcast(self._sensor_summary())
+
+        elif t == "clear_reference":
+            self.heading_reference = None
+            await self.broadcast(self._sensor_summary())
+
+        elif t == "set_config":
             self.config.host              = msg.get("host", self.config.host)
             self.config.start_channel     = int(msg.get("start_ch", self.config.start_channel))
             self.config.pixel_count       = int(msg.get("pixel_count", self.config.pixel_count))
             self.config.inter_pixel_delay = float(msg.get("delay", self.config.inter_pixel_delay))
             self.config.output_mode       = msg.get("output_mode", self.config.output_mode)
+            self.config.min_conf          = float(msg.get("min_conf", self.config.min_conf))
+            self.config.hfov_deg          = float(msg.get("hfov_deg", self.config.hfov_deg))
             self.model.pixel_count        = self.config.pixel_count
+            await self.broadcast(self._sensor_config(), role="sensor")
             await ws.send(json.dumps({"type": "status", "message": "Config saved"}))
             asyncio.create_task(self._probe_controller(ws))
 
         elif t == "set_session":
             sid = _new_session_id()
+            # A compass-derived angle from the sensor wins over a typed one.
+            angle = msg.get("angle", 0)
+            if msg.get("angle_source") == "compass":
+                measured = self._sensor_angle()
+                if measured is not None:
+                    angle = measured
             self.current_session = SessionConfig(
                 session_id=sid,
-                angle_deg=float(msg.get("angle", 0)),
+                angle_deg=float(angle),
                 distance_m=float(msg.get("distance", 2.0)),
                 height_m=float(msg.get("height", 1.5)),
-                hfov_deg=float(msg.get("hfov_deg", self.current_session.hfov_deg
-                                       if self.current_session else 60.0)),
+                hfov_deg=float(msg.get("hfov_deg", self.config.hfov_deg)),
                 img_width=int(msg.get("img_width", 1280)),
                 img_height=int(msg.get("img_height", 720)),
             )
@@ -800,6 +880,11 @@ class BlinkyServer:
             self.scan_task = asyncio.create_task(self._run_scan())
 
         elif t == "detection":
+            # Structurally prevent a control client (e.g. a laptop whose webcam
+            # got opened) from racing the real sensor's observations.
+            if self.clients.get(ws) == "control":
+                log.debug("Ignoring detection from a control client")
+                return
             idx = int(msg["index"])
             det = Detection(
                 cx=float(msg["cx"]),

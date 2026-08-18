@@ -419,3 +419,29 @@ input[type="range"]::-moz-range-thumb {
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #ffffff25; border-radius: 4px; }
+
+/* ── Role chooser ─────────────────────────────────────────────────────────── */
+.role-card {
+  display: flex; align-items: center; gap: 1rem;
+  padding: 1rem; margin: 0.75rem 1rem;
+  background: #16162a; border: 1px solid #2a2a45; border-radius: 10px;
+  text-decoration: none; color: inherit;
+}
+.role-card:active { background: #1d1d38; }
+.role-icon  { font-size: 2rem; line-height: 1; }
+.role-title { font-size: 1.1rem; font-weight: 600; color: #e8e8ff; }
+.role-desc  { font-size: 0.85rem; color: #9a9ac0; margin-top: 0.2rem; }
+.dot-grey   { background: #555577; }
+
+/* ── Compass readout (sensor) ─────────────────────────────────────────────── */
+.compass-readout { text-align: center; padding: 0.5rem 0 0.25rem; }
+.compass-angle {
+  font-size: 3.4rem; font-weight: 700; line-height: 1;
+  color: #69f0ae; font-variant-numeric: tabular-nums;
+}
+.compass-sub { font-size: 0.8rem; color: #9a9ac0; margin-top: 0.2rem; }
+.compass-raw {
+  text-align: center; font-size: 0.8rem; color: #7a7aa0;
+  margin: 0.35rem 0 0.6rem;
+}
+.sensor-body #cam-preview { max-height: 34vh; }

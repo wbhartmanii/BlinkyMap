@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>BlinkyMap Sensor</title>
+  <link rel="stylesheet" href="style.css?v=17" />
+</head>
+<body class="sensor-body">
+
+<header id="app-header">
+  <div class="header-logo">&#128241; Sensor</div>
+  <div id="unit-toggle">
+    <button class="unit-btn active" data-unit="m">m</button>
+    <button class="unit-btn" data-unit="ft">ft</button>
+  </div>
+  <div id="ws-indicator" class="dot dot-red" title="WebSocket status"></div>
+</header>
+
+<section class="tab-panel active">
+
+  <!-- ── Camera ── -->
+  <button class="btn-secondary wide" id="btn-open-camera">Open Camera</button>
+  <div id="cam-status-bar" class="cam-status cam-status-off">Camera: not open</div>
+  <video id="cam-preview" autoplay playsinline muted></video>
+  <canvas id="cam-canvas" style="display:none"></canvas>
+
+  <!-- ── Compass ── -->
+  <h2>Heading</h2>
+  <button class="btn-secondary wide" id="btn-enable-compass">Enable Compass</button>
+
+  <div id="compass-block" style="display:none">
+    <div class="compass-readout">
+      <div class="compass-angle" id="compass-angle">–</div>
+      <div class="compass-sub" id="compass-sub">angle around model</div>
+    </div>
+    <div class="compass-raw" id="compass-raw"></div>
+    <div id="compass-guide" class="cam-status" style="display:none"></div>
+    <button class="btn-primary wide" id="btn-set-reference">Set this position as 0&deg;</button>
+    <button class="btn-secondary wide" id="btn-clear-reference" style="display:none">Clear 0&deg; reference</button>
+  </div>
+
+  <div id="compass-fallback" style="display:none">
+    <p class="slider-hint" id="compass-fallback-msg"></p>
+    <label>Angle around model (&deg;)
+      <input id="sess-angle" type="number" value="0" min="0" max="359" step="5" />
+    </label>
+  </div>
+
+  <!-- ── Position ── -->
+  <h2>Position</h2>
+  <label>Distance from center (<span class="unit-sfx">m</span>)
+    <input id="sess-dist" type="number" value="2.0" min="0.5" max="20" step="0.5" />
+  </label>
+  <label>Camera height (<span class="unit-sfx">m</span>)
+    <input id="sess-height" type="number" value="1.5" min="0.2" max="10" step="0.1" />
+  </label>
+
+  <button class="btn-primary wide" id="btn-scan-here">Scan From Here</button>
+  <p id="scan-hint" class="slider-hint"></p>
+
+  <!-- ── Progress ── -->
+  <div id="scan-progress-block" style="display:none">
+    <div class="progress-bar-wrap">
+      <div id="scan-progress-bar" class="progress-bar"></div>
+    </div>
+    <p id="scan-progress-label">0 / 0</p>
+    <div id="scan-debug">
+      <canvas id="diff-canvas"></canvas>
+      <div id="diff-label">diff view</div>
+    </div>
+    <button class="btn-danger wide" id="btn-stop-scan">Stop Scan</button>
+  </div>
+
+  <div id="last-result" class="cam-status" style="display:none"></div>
+
+  <p class="slider-hint">
+    Keep this screen awake — mobile browsers suspend JavaScript on lock, which
+    stops detection mid-scan.
+  </p>
+  <p class="slider-hint"><a href="./">&larr; change role</a></p>
+</section>
+
+<script type="module" src="sensor.js?v=17"></script>
+</body>
+</html>

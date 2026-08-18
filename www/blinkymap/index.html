@@ -5,167 +5,65 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>BlinkyMap</title>
-  <link rel="stylesheet" href="style.css?v=16" />
-
-  <!-- Import map for Three.js (served locally after install.sh) -->
-  <script type="importmap">
-  {
-    "imports": {
-      "three": "./vendor/three.module.min.js",
-      "three/addons/controls/OrbitControls.js": "./vendor/OrbitControls.js"
-    }
-  }
-  </script>
+  <link rel="stylesheet" href="style.css?v=17" />
 </head>
 <body>
 
-<!-- ── Header ── -->
 <header id="app-header">
   <div class="header-logo">&#128336; BlinkyMap</div>
-  <div id="unit-toggle">
-    <button class="unit-btn active" data-unit="m">m</button>
-    <button class="unit-btn" data-unit="ft">ft</button>
-  </div>
-  <div id="ws-indicator" class="dot dot-red" title="WebSocket status"></div>
+  <div id="ws-indicator" class="dot dot-grey" title="pick a role"></div>
 </header>
 
-<!-- ── Tab bar ── -->
-<nav id="tab-bar">
-  <button class="tab-btn active" data-tab="setup">Setup</button>
-  <button class="tab-btn"        data-tab="scan">Scan</button>
-  <button class="tab-btn"        data-tab="model">3D Model</button>
-  <button class="tab-btn"        data-tab="export">Export</button>
-</nav>
+<section class="tab-panel active" id="role-chooser">
+  <h2>What is this device?</h2>
+  <p class="slider-hint">
+    BlinkyMap runs as two halves: a control screen that configures the
+    controller and renders the model, and a sensor that carries the camera and
+    compass around the prop. Open one of each.
+  </p>
 
-<!-- ══════════════════════════════════════════════════════════════════════════
-     SETUP TAB
-     ══════════════════════════════════════════════════════════════════════════ -->
-<section id="tab-setup" class="tab-panel active">
-  <h2>Controller</h2>
-  <label>FPP / Controller IP
-    <input id="cfg-host" type="text" value="127.0.0.1" inputmode="decimal" />
-  </label>
-  <label>Output Mode
-    <select id="cfg-output-mode">
-      <option value="auto">Auto-detect (FPP API or E1.31)</option>
-      <option value="fpp">FPP API (multisync-aware)</option>
-      <option value="e131">E1.31 / sACN (direct)</option>
-    </select>
-  </label>
-  <label>Start Channel (absolute FPP channel)
-    <input id="cfg-start" type="number" value="1" min="1" max="999999" />
-  </label>
-  <label>Pixel Count
-    <input id="cfg-pixels" type="number" value="100" min="1" max="2048" />
-  </label>
-  <label>Capture Delay (s)
-    <input id="cfg-delay" type="number" value="0.15" min="0.05" max="2" step="0.05" />
-  </label>
-  <button class="btn-primary wide" id="btn-save-config">Save &amp; Connect</button>
-  <div id="controller-status" class="controller-status" style="display:none"></div>
-  <button class="btn-secondary wide" id="btn-test-blink">Test Sweep</button>
-  <button class="btn-danger wide"     id="btn-stop-test" style="display:none">Stop Sweep</button>
-  <p id="test-result-msg" class="test-result" style="display:none"></p>
+  <a class="role-card" href="control.html?v=17" id="role-control">
+    <div class="role-icon">&#128421;</div>
+    <div class="role-body">
+      <div class="role-title">Control</div>
+      <div class="role-desc">
+        Laptop or desktop. Controller setup, session list, 3D model, export.
+        No camera needed.
+      </div>
+    </div>
+  </a>
 
-  <h2>Camera</h2>
-  <label>Horizontal FOV (°)
-    <input id="cfg-fov" type="number" value="60" min="20" max="170" step="1" />
-  </label>
-  <label>
-    <span>Min Detection Confidence: <span id="cfg-min-conf-val">50%</span></span>
-    <input id="cfg-min-conf" type="range" value="50" min="5" max="95" step="5" />
-    <span class="slider-hint">Lower → more pixels detected (more false positives) · Higher → fewer but more accurate</span>
-  </label>
-  <button class="btn-secondary wide" id="btn-open-camera">Open Camera</button>
-  <video id="cam-preview" autoplay playsinline muted></video>
-  <canvas id="cam-canvas" style="display:none"></canvas>
+  <a class="role-card" href="sensor.html?v=17" id="role-sensor">
+    <div class="role-icon">&#128241;</div>
+    <div class="role-body">
+      <div class="role-title">Sensor</div>
+      <div class="role-desc">
+        Phone. Camera plus compass — carry it to each position and start the
+        scan from there.
+      </div>
+    </div>
+  </a>
+
+  <p class="slider-hint" id="role-hint"></p>
 </section>
 
-<!-- ══════════════════════════════════════════════════════════════════════════
-     SCAN TAB
-     ══════════════════════════════════════════════════════════════════════════ -->
-<section id="tab-scan" class="tab-panel">
-  <h2>Session Position</h2>
-  <label>Angle around model (°)
-    <input id="sess-angle" type="number" value="0" min="0" max="359" step="5" />
-  </label>
-  <label>Distance from center (<span class="unit-sfx">m</span>)
-    <input id="sess-dist" type="number" value="2.0" min="0.5" max="20" step="0.5" />
-  </label>
-  <label>Camera height (<span class="unit-sfx">m</span>)
-    <input id="sess-height" type="number" value="1.5" min="0.2" max="10" step="0.1" />
-  </label>
-  <div id="cam-status-bar" class="cam-status cam-status-off">
-    Camera: not open &mdash; open in Setup tab before scanning
-  </div>
-  <button class="btn-primary wide" id="btn-start-session">Start Session</button>
-
-  <div id="scan-progress-block" style="display:none">
-    <div class="progress-bar-wrap">
-      <div id="scan-progress-bar" class="progress-bar"></div>
-    </div>
-    <p id="scan-progress-label">0 / 0</p>
-    <div id="scan-debug">
-      <canvas id="diff-canvas"></canvas>
-      <div id="diff-label">diff view</div>
-    </div>
-    <button class="btn-danger wide" id="btn-stop-scan">Stop Scan</button>
-  </div>
-
-  <!-- Suggested next position — shown after each scan -->
-  <div id="suggestion-card" style="display:none">
-    <div class="suggestion-header">
-      <span class="suggestion-icon">&#127919;</span>
-      <span>Move camera here next</span>
-    </div>
-    <div class="suggestion-angle" id="sugg-angle">–</div>
-    <div class="suggestion-dist"  id="sugg-dist"></div>
-    <div class="suggestion-reason" id="sugg-reason"></div>
-    <button class="btn-primary wide" id="btn-use-suggestion">Use This Angle</button>
-  </div>
-
-  <h2>Sessions</h2>
-  <div id="session-list"></div>
-
-  <div id="confidence-block">
-    <div id="confidence-pct">–</div>
-    <div id="confidence-grade">–</div>
-    <div id="confidence-detail"></div>
-    <div id="confidence-tip"></div>
-  </div>
-</section>
-
-<!-- ══════════════════════════════════════════════════════════════════════════
-     MODEL TAB
-     ══════════════════════════════════════════════════════════════════════════ -->
-<section id="tab-model" class="tab-panel">
-  <div id="viewer-container"></div>
-  <div id="pixel-list-wrap">
-    <div class="list-header">
-      <span>Ch#</span><span>Status</span><span>Conf</span><span>Seen</span>
-    </div>
-    <div id="pixel-list"></div>
-  </div>
-</section>
-
-<!-- ══════════════════════════════════════════════════════════════════════════
-     EXPORT TAB
-     ══════════════════════════════════════════════════════════════════════════ -->
-<section id="tab-export" class="tab-panel">
-  <h2>Export</h2>
-  <p id="export-confidence-label">Run at least 2 sessions to export.</p>
-  <button class="btn-primary wide" id="btn-export-xmodel">Download .xmodel</button>
-  <button class="btn-secondary wide" id="btn-export-csv">Download CSV</button>
-
-  <h2>xLights Import</h2>
-  <ol class="instructions">
-    <li>Open xLights → <strong>Layout</strong> tab.</li>
-    <li>Right-click model list → <strong>Import Model</strong>.</li>
-    <li>Select <code>BlinkyTree.xmodel</code>.</li>
-    <li>The model uses cylindrical-unwrap: rows = height, cols = angle.</li>
-  </ol>
-</section>
-
-<script type="module" src="app.js?v=16"></script>
+<script>
+  // Remember the choice so a reload skips this screen; ?pick=1 forces it back.
+  const params = new URLSearchParams(location.search);
+  const saved  = localStorage.getItem("blinkymap-role");
+  if (saved && !params.has("pick")) {
+    location.replace(saved === "sensor" ? "sensor.html?v=17" : "control.html?v=17");
+  }
+  for (const [id, role] of [["role-control", "control"], ["role-sensor", "sensor"]]) {
+    document.getElementById(id).addEventListener("click", () => {
+      localStorage.setItem("blinkymap-role", role);
+    });
+  }
+  // A touch device with no fine pointer is almost certainly the phone.
+  const likelySensor = window.matchMedia("(pointer: coarse)").matches;
+  document.getElementById("role-hint").textContent = likelySensor
+    ? "This looks like a touch device — Sensor is probably what you want."
+    : "This looks like a desktop — Control is probably what you want.";
+</script>
 </body>
 </html>
