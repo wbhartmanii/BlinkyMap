@@ -117,8 +117,10 @@ export function detectLED(videoEl, canvasEl, bgImageData, threshold = 30,
   // Sparsity: a single LED lights a tiny patch. If a large share of the frame
   // moved, the camera re-exposed or white-balanced and the whole difference is
   // meaningless — 2% of frame is already far more than any point source needs.
+  // A real LED plus the glow it throws on its neighbours can legitimately light
+  // a few percent of frame; only a whole-frame move means the camera re-exposed.
   const litFrac  = litCount / N;
-  const sparsity = Math.max(0, Math.min(1, 1 - litFrac / 0.02));
+  const sparsity = Math.max(0, Math.min(1, 1 - litFrac / 0.08));
 
   // Pass 2: centroid in a window on the peak, plus blob area and rival peak.
   const px = peakIdx % W, py = (peakIdx / W) | 0;
@@ -145,16 +147,25 @@ export function detectLED(videoEl, canvasEl, bgImageData, threshold = 30,
 
   if (sumW < 1e-6) return { found: false, reason: "no energy in window" };
 
-  // A point source covers a tiny share of frame; 0.5% is already generous.
-  const areaFrac   = blob / N;
-  const compactness = Math.max(0, Math.min(1, 1 - areaFrac / 0.005));
-  const uniqueness  = peakLum > 0 ? Math.max(0, 1 - rival / peakLum) : 0;
+  // A point source covers a tiny share of frame; 1% is already generous.
+  const areaFrac    = blob / N;
+  const compactness = Math.max(0, Math.min(1, 1 - areaFrac / 0.01));
+
+  // Only penalise a rival bright enough to have been a plausible alternative.
+  // A neighbour glowing at a third of the peak is normal on any real prop and
+  // must not count against the reading; a rival at 80% means the peak-finder's
+  // choice between them was close to arbitrary.
+  const rivalFrac  = peakLum > 0 ? rival / peakLum : 1;
+  const uniqueness = Math.max(0, Math.min(1, (1 - rivalFrac) / 0.5));
 
   return {
     found: true,
     cx: sumX / sumW,
     cy: sumY / sumW,
-    conf: sparsity * compactness * uniqueness,
+    // Geometric mean, not a product: three independent 0.85s describe a good
+    // detection, but their product is 0.61 and reads like a bad one. The mean
+    // keeps a single zero decisive while staying interpretable.
+    conf: Math.cbrt(sparsity * compactness * uniqueness),
     purity: sumW / totalEnergy,
     peak: peakLum,
     sparsity, compactness, uniqueness,

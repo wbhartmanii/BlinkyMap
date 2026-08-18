@@ -482,7 +482,9 @@ body.sensor-body {
   border-radius: 10px; overflow: hidden;
   background: #0d0d14; border: 1px solid #2a2a45;
 }
-#cam-wrap video  { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* contain, not cover: the operator must see the entire frame the detector is
+   searching, and a cropped preview makes the marker's position unverifiable. */
+#cam-wrap video  { width: 100%; height: 100%; object-fit: contain; display: block; }
 #cam-wrap canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 #cam-placeholder {
   position: absolute; inset: 0; display: flex;

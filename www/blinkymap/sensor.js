@@ -376,10 +376,16 @@ function drawDiff(result) {
   ctx.clearRect(0, 0, camOverlay.width, camOverlay.height);
   if (!result || !result.found) return;
 
-  const sx = camOverlay.width  / camWidth;
-  const sy = camOverlay.height / camHeight;
-  const x  = result.cx * sx;
-  const y  = result.cy * sy;
+  // The video is letterboxed inside the box by object-fit: contain, so the
+  // frame does NOT map 1:1 onto the overlay. Reproduce the same fit to place
+  // the marker: uniform scale, then centre the leftover space. Assuming a 1:1
+  // map squished the marker and pushed it outside the visible image whenever
+  // the frame's aspect differed from the box's.
+  const scale = Math.min(camOverlay.width / camWidth, camOverlay.height / camHeight);
+  const offX  = (camOverlay.width  - camWidth  * scale) / 2;
+  const offY  = (camOverlay.height - camHeight * scale) / 2;
+  const x = offX + result.cx * scale;
+  const y = offY + result.cy * scale;
 
   // Purity is the share of lit energy inside the detection window; a low value
   // means other bright things were in frame, so flag the reading as suspect.
