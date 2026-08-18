@@ -14,7 +14,9 @@ WWW_DIR="$PLUGIN_DIR/www/blinkymap"
 echo "BlinkyMap: installing on ${PRETTY_NAME:-unknown OS}"
 
 # ── Detect FPP DocumentRoot from running Apache config ────────────────────────
-FPP_DOCROOT=$(grep -rh "^[[:space:]]*DocumentRoot" /etc/apache2/sites-enabled/ 2>/dev/null \
+# -R (not -r): sites-enabled entries are symlinks into sites-available,
+# and plain -r will not follow them.
+FPP_DOCROOT=$(grep -Rh "^[[:space:]]*DocumentRoot" /etc/apache2/sites-enabled/ 2>/dev/null \
     | grep -v "#" | awk '{print $2}' | head -1)
 [ -z "$FPP_DOCROOT" ] && FPP_DOCROOT="/opt/fpp/www"
 echo "BlinkyMap: detected FPP DocumentRoot: ${FPP_DOCROOT}"
