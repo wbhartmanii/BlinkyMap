@@ -251,7 +251,7 @@ async function handleServerMessage(msg) {
 }
 
 // ── Config ────────────────────────────────────────────────────────────────────
-btnSaveConfig.addEventListener("click", () => {
+function sendConfig() {
   send({
     type:        "set_config",
     host:        cfgHost.value.trim(),
@@ -260,6 +260,10 @@ btnSaveConfig.addEventListener("click", () => {
     pixel_count: parseInt(cfgPixels.value),
     delay:       parseFloat(cfgDelay.value),
   });
+}
+
+btnSaveConfig.addEventListener("click", () => {
+  sendConfig();
   controllerStatus.textContent = `Checking ${cfgHost.value.trim()}…`;
   controllerStatus.className   = "controller-status ctrl-ok";
   controllerStatus.style.display = "block";
@@ -267,6 +271,9 @@ btnSaveConfig.addEventListener("click", () => {
 
 // ── Test blink ────────────────────────────────────────────────────────────────
 btnTestBlink.addEventListener("click", () => {
+  // Push the current form values first — otherwise the sweep runs against
+  // whatever config the server last received.
+  sendConfig();
   send({ type: "test_sweep" });
   btnTestBlink.style.display = "none";
   btnStopTest.style.display  = "block";

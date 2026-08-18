@@ -819,10 +819,14 @@ class BlinkyServer:
             mode = "FPP API" if isinstance(output, FPPOutput) else "E1.31"
             n = cfg.pixel_count
 
+            # Honour the configured Capture Delay; the sweep exists to preview
+            # exactly the pacing a real scan will use.
+            delay = max(cfg.inter_pixel_delay, 0.0)
+
             for idx in range(n):
-                def _one(i=idx, o=output):
+                def _one(i=idx, o=output, d=delay):
                     o.pixel_on(i)
-                    time.sleep(0.15)
+                    time.sleep(d)
 
                 await loop.run_in_executor(None, _one)
                 await ws.send(json.dumps({
