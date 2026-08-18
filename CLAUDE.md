@@ -24,19 +24,46 @@ BlinkyMap is an FPP (Falcon Player) plugin that automatically builds a 3D xLight
 - **Asset cache busting** via `?v=N` query strings on CSS/JS/HTML. Increment `v=` when deploying to FPP (FPP caches aggressively).
 
 ## Deployment Environment
-- **FPP Master**: Debian 12 at 192.168.25.207
+
+### Current test box — 192.168.25.111 ("FPP-Test")
+Plugin is installed and verified here (2026-08-17).
+- FPP 9.5.3 on Raspbian Bookworm, Pi Zero 2 W, K2-Pi0 cape, mode=player, multisync **off**
+- Apache 2 + PHP 8.2-FPM; DocumentRoot `/opt/fpp/www`
+- Plugin dir: `/home/fpp/media/plugins/blinkymap`
+- Deps from apt: numpy 1.24.2, websockets 10.4, requests 2.28.1 (no pip on this image)
+- **Pixel setup** — two configured strings, only the first is physically populated:
+  | Port | Description | Pixels | FPP channels (1-based) | Populated |
+  |------|-------------|--------|------------------------|-----------|
+  | 0 | Test String 1 | 24 | 1–72 | **yes** |
+  | 1 | Test String 2 | 100 | 1001–1300 | no |
+  Channels 73–1000 map to nothing. A sweep spanning both strings lights 24
+  pixels and then appears to stall — that is the gap, not a bug.
+  Use Start Channel `1`, Pixel Count `24`.
+- SSH: `ssh fpp@192.168.25.111` (key `~/.ssh/fpp_ed25519`, entry in `~/.ssh/config`)
+
+### Older boxes (from earlier sessions, not currently in use)
+- **FPP Master**: Debian 12 at 192.168.25.207 — 50 pixels, start channel 9004, multisync enabled
 - **FPP Remote**: Raspberry Pi Zero (K2-Pi0) at 192.168.25.204
-- **Pixel setup**: 50 pixels, port 1, starting channel 9004, FPP multisync enabled
+
+### Operations
 - **Server restart**: `sudo pkill -f blinkymap_server` (www/index.php auto-restarts on next page load)
-- **Logs**: `/tmp/blinkymap_server.log` on FPP master
+- **Logs**: `/tmp/blinkymap_server.log` on the box running the plugin
 
 ## FPP API Notes
-- Light individual pixels: `POST /api/command` with `{"command":"Test Start","multisyncCommand":true,"args":["Pixel","1","<startCh>","<pixelIdx>",...]}`
+Verified against FPP 9.5.3 on 2026-08-17.
+- Light one pixel: `POST /api/command` with
+  `{"command":"Test Start","multisyncCommand":true,"multisyncHosts":"","args":["100","RGB Single Color","<startCh>-<endCh>","#rrggbb"]}`
+  The channel range is inclusive and absolute. Confirm it took with
+  `GET /api/testmode` → `{"channelSet":"1-3",...,"enabled":1}`.
 - Stop: `POST /api/command` with `{"command":"Test Stop","multisyncCommand":true,"args":[]}`
-- FPP channels are 1-indexed and absolute (not per-port). Starting channel 9004 means pixel 0 = channel 9004, pixel 1 = channel 9005 (for RGB: channels 9004-9006 for pixel 0).
+  (`GET /api/testmode` then returns `{"enabled":0}`).
+- FPP channels are 1-indexed and absolute (not per-port). RGB pixels consume
+  **3 channels each**, so with start channel S, pixel *i* occupies
+  `S + i*3` through `S + i*3 + 2` — e.g. start 1 → pixel 0 = ch 1–3,
+  pixel 1 = ch 4–6, pixel 23 = ch 70–72.
 
 ## Development Branch
-All new work goes on `claude/blinkymap-3d-modeling-J34d4`, then merges to `main`.
+Current working branch: `claude/fpp-plugin-testing-b9pzvc`, then merges to `main`.
 
 ## Known Issues / GitHub Issues
 See https://github.com/wbhartmanii/BlinkyMap/issues for the current list.
