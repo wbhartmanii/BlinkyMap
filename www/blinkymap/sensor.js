@@ -13,7 +13,7 @@
 import { openCamera, captureBackground, detectLED } from "./camera.js";
 import { Compass, angleDelta } from "./compass.js";
 
-export const BUILD = "v26";
+export const BUILD = "v27";
 const WS_URL = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/blinkymap-ws`;
 
 const $ = (id) => document.getElementById(id);
@@ -158,7 +158,10 @@ async function onMessage(msg) {
         if (result.found && result.conf >= minConf) {
           send({ type: "detection", index: idx, cx: result.cx, cy: result.cy, conf: result.conf });
         } else {
-          send({ type: "no_detection", index: idx });
+          send({ type: "no_detection", index: idx,
+                 conf: result.found ? result.conf : null,
+                 sparsity: result.sparsity, compactness: result.compactness,
+                 uniqueness: result.uniqueness });
         }
       } else {
         send({ type: "no_detection", index: idx });

@@ -924,7 +924,16 @@ class BlinkyServer:
 
         elif t == "no_detection":
             msg_idx = int(msg.get("index", -1))
-            log.debug("No-detection received: pixel %d (not queued; server uses timeout)", msg_idx)
+            # Log why, at INFO: a scan that finds nothing is otherwise silent,
+            # and the confidence breakdown is the only way to tell a genuinely
+            # hidden pixel from a mis-tuned gate.
+            c = msg.get("conf")
+            if c is not None:
+                log.info("Pixel %d rejected: conf=%.2f (sparse=%.2f compact=%.2f unique=%.2f)",
+                         msg_idx, c, msg.get("sparsity") or 0.0,
+                         msg.get("compactness") or 0.0, msg.get("uniqueness") or 0.0)
+            else:
+                log.debug("No-detection: pixel %d (not queued; server uses timeout)", msg_idx)
 
         elif t == "test_sweep":
             if self.test_task and not self.test_task.done():
