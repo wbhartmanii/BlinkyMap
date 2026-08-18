@@ -703,6 +703,30 @@ class BlinkyServer:
             # Replay existing model state so a reconnecting or second client
             # (e.g. the laptop when the phone holds the camera) sees the model
             # that has already been built, instead of an empty viewer.
+            if self.model.sessions:
+                # Session cards live only in client memory, so a reload used to
+                # leave sessions alive on the server but invisible (and so
+                # undeletable) in the UI — silently polluting every model.
+                await ws.send(json.dumps({
+                    "type": "session_list",
+                    "sessions": [
+                        {
+                            "session":  sid,
+                            "detected": len(dets),
+                            "total":    self.model.pixel_count or self.config.pixel_count,
+                            "angle":    sc.angle_deg,
+                            "distance": sc.distance_m,
+                            "height":   sc.height_m,
+                            "detections": {
+                                i: {"cx": round(d.cx, 1), "cy": round(d.cy, 1),
+                                    "conf": round(d.conf, 3)}
+                                for i, d in dets.items()
+                            },
+                        }
+                        for sid, (sc, dets) in sorted(self.model.sessions.items())
+                    ],
+                }))
+
             if self.model.results:
                 await ws.send(json.dumps({
                     "type": "model", "pixels": self.model.to_json_pixels(),

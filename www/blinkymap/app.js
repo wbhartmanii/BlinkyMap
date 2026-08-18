@@ -205,6 +205,18 @@ async function handleServerMessage(msg) {
       }
       break;
 
+    case "session_list":
+      // Replayed on (re)connect. Rebuild from scratch so a reload shows every
+      // session the server actually holds — otherwise they stay invisible and
+      // cannot be deleted, while still feeding triangulation.
+      sessions.length = 0;
+      sessionList.innerHTML = "";
+      for (const s of msg.sessions || []) {
+        addSessionCard(s.session, s.detected, s.total, s.detections || {},
+                       s.angle ?? 0, s.distance ?? 2, s.height ?? 1.5);
+      }
+      break;
+
     case "model":
       latestPixels = msg.pixels;
       if (viewer) viewer.update(latestPixels);
