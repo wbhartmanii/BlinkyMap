@@ -44,6 +44,10 @@ const progressBar   = $("scan-progress-bar");
 const progressLabel = $("scan-progress-label");
 const camOverlay    = $("cam-overlay");
 const camWrap       = document.getElementById("cam-wrap");
+const hudAngle      = $("hud-angle");
+const hudLabel      = $("hud-angle-label");
+const setupStrip    = $("setup-strip");
+const btnSetup      = $("btn-setup-toggle");
 const btnStopScan   = $("btn-stop-scan");
 const lastResult    = $("last-result");
 
@@ -60,6 +64,21 @@ let hasCompass = false;
 let headingRef = null;      // as reported back by the server
 let liveAngle = null;
 let targetAngle = null;   // suggested next position, from the server
+
+// ── Setup panel ───────────────────────────────────────────────────────────────
+// Setup is per-session; the working screen is per-position. Collapse it as soon
+// as the three prerequisites are met so the stage keeps the space.
+function setSetupOpen(open) {
+  setupStrip.classList.toggle("open", open);
+  btnSetup.classList.toggle("open", open);
+}
+btnSetup.addEventListener("click", () => setSetupOpen(!setupStrip.classList.contains("open")));
+
+function maybeCollapseSetup() {
+  const ready = camPreview.srcObject &&
+                (!hasCompass || (headingRef !== null && headingRef !== undefined));
+  if (ready) setSetupOpen(false);
+}
 
 // ── Units ─────────────────────────────────────────────────────────────────────
 function toMeters(v) { return units === "ft" ? v / 3.28084 : v; }
@@ -176,6 +195,7 @@ async function onMessage(msg) {
       headingRef = msg.reference;
       liveAngle  = msg.angle;
       renderCompass();
+      maybeCollapseSetup();
       break;
 
     case "status":
@@ -197,6 +217,7 @@ btnOpenCamera.addEventListener("click", async () => {
     const dim = await openCamera(camPreview, camCanvas);
     camWidth = dim.width; camHeight = dim.height;
     camWrap.classList.add("live");
+    maybeCollapseSetup();
     setCamStatus(`Camera open: ${camWidth}x${camHeight}`, "cam-status-on");
     btnOpenCamera.textContent = "Restart Camera";
   } catch (e) {
@@ -213,7 +234,7 @@ btnEnableCompass.addEventListener("click", async () => {
   if (res === "ok") {
     hasCompass = true;
     btnEnableCompass.style.display = "none";
-    compassBlock.style.display = "block";
+    btnEnableCompass.textContent = "Compass on";
     compassFallback.style.display = "none";
     compass.onHeading = (deg, acc) => {
       // Throttle: the sensor fires far faster than anyone needs.
@@ -242,17 +263,21 @@ function showFallback(reason) {
 }
 
 function renderCompass(deg = compass.heading, acc = compass.accuracy) {
-  if (!hasCompass) return;
+  if (!hasCompass) {
+    hudAngle.textContent = "—";
+    hudLabel.textContent = "manual angle";
+    return;
+  }
   if (headingRef === null || headingRef === undefined) {
-    compassAngle.textContent = "—";
-    compassSub.textContent   = "set a 0° reference to begin";
+    hudAngle.textContent = "—";
+    hudLabel.textContent = "set 0° to begin";
     btnClearRef.style.display = "none";
   } else {
     const a = liveAngle !== null && liveAngle !== undefined
       ? liveAngle
       : (deg !== null ? ((deg - headingRef) % 360 + 360) % 360 : null);
-    compassAngle.textContent = a === null ? "—" : `${Math.round(a)}°`;
-    compassSub.textContent   = "angle around model";
+    hudAngle.textContent = a === null ? "—" : `${Math.round(a)}°`;
+    hudLabel.textContent = "around model";
     btnClearRef.style.display = "block";
   }
   compassRaw.textContent = deg === null
@@ -371,6 +396,7 @@ function drawDiff(result) {
   ctx.stroke();
 }
 
-// Show manual entry until the compass is proven to work.
+// First run: setup is the only thing to do, so lead with it.
 compassFallback.style.display = "none";
+setSetupOpen(true);
 connect();
