@@ -446,6 +446,24 @@ class BlinkyModel:
         mean_conf = float(np.mean(confs)) if confs else 0.0
         overall = 0.5 * coverage + 0.5 * mean_conf
 
+        # Which of the three confidence terms is actually holding the score
+        # down? Without this the UI can only guess, and its guess ("add more
+        # angles") is wrong whenever spread is already saturated.
+        reproj = [pr.reprojection_error for pr in self.results.values()
+                  if pr.position is not None]
+        mean_reproj = float(np.median(reproj)) if reproj else 0.0
+        spread = _angular_spread([(None, sc) for sc, _ in self.sessions.values()])
+        accuracy = max(0.0, 1.0 - mean_reproj / 20.0)
+
+        if coverage < 0.9:
+            limiting = "coverage"
+        elif spread < 0.5:
+            limiting = "spread"
+        elif accuracy < 0.5:
+            limiting = "accuracy"
+        else:
+            limiting = "none"
+
         if overall >= 0.80:
             grade = "Excellent"
         elif overall >= 0.60:
@@ -460,6 +478,10 @@ class BlinkyModel:
             "grade": grade,
             "coverage": round(coverage, 3),
             "mean_confidence": round(mean_conf, 3),
+            "spread": round(spread, 3),
+            "reproj_px": round(mean_reproj, 1),
+            "limiting": limiting,
+            "sessions": len(self.sessions),
             **grades,
         }
 

@@ -410,7 +410,29 @@ function updateConfidence(msg) {
   } else if ((msg.unseen ?? 0) > (msg.high + msg.medium + msg.low)) {
     tip = `${msg.unseen} pixels still unseen — scan from more angles to find them.`;
   } else {
-    tip = `${msg.high} high-confidence · ${msg.medium} medium · ${msg.low} low · ${msg.unseen} unseen. Add more angles to improve accuracy.`;
+    // The server tells us which of the three confidence terms is capping the
+    // score. Guessing "add more angles" is actively wrong once angular spread
+    // is already saturated — extra scans then cannot move the number at all.
+    switch (msg.limiting) {
+      case "coverage":
+        tip = `${msg.unseen} pixels never seen from two positions — scan more angles, ` +
+              `or lower the detection confidence threshold.`;
+        break;
+      case "spread":
+        tip = `Your scan positions are too close together (spread ` +
+              `${Math.round((msg.spread ?? 0) * 180)}° of a possible 180°). ` +
+              `Move further around the model — roughly 90° apart.`;
+        break;
+      case "accuracy":
+        tip = `Coverage and angle spread are already maxed, so more scans will not ` +
+              `raise this score. Reprojection error is ${msg.reproj_px}px — the limit ` +
+              `is detection precision and how accurately the distance and height were ` +
+              `entered. Spread the pixels out, or re-measure your position.`;
+        break;
+      default:
+        tip = `${msg.high} high-confidence · ${msg.medium} medium · ${msg.low} low · ` +
+              `${msg.unseen} unseen across ${msg.sessions ?? nSess} positions.`;
+    }
   }
   confidenceTip.textContent = tip;
 
