@@ -41,9 +41,10 @@ export class Viewer3D {
     this._controls.dampingFactor = 0.08;
     this._controls.target.set(0, 0.5, 0);
 
-    // Grid helper
-    const grid = new THREE.GridHelper(4, 20, 0x222244, 0x1a1a30);
-    this._scene.add(grid);
+    // Grid helper — resized to the model in _fitView()
+    this._grid = new THREE.GridHelper(4, 20, 0x222244, 0x1a1a30);
+    this._scene.add(this._grid);
+    this._lastRadius = null;
 
     // Placeholder points
     this._dotCloud   = null;
@@ -79,6 +80,20 @@ export class Viewer3D {
 
     const n = positioned.length;
 
+    // Measure the model. Every size below is expressed relative to this, so a
+    // 0.3 m test string and a 4 m megatree both render sensibly.
+    let lo = [ Infinity,  Infinity,  Infinity];
+    let hi = [-Infinity, -Infinity, -Infinity];
+    for (const p of positioned) {
+      lo[0] = Math.min(lo[0], p.x); hi[0] = Math.max(hi[0], p.x);
+      lo[1] = Math.min(lo[1], p.y); hi[1] = Math.max(hi[1], p.y);
+      lo[2] = Math.min(lo[2], p.z); hi[2] = Math.max(hi[2], p.z);
+    }
+    const centre = [(lo[0]+hi[0])/2, (lo[1]+hi[1])/2, (lo[2]+hi[2])/2];
+    const extent = Math.max(hi[0]-lo[0], hi[1]-lo[1], hi[2]-lo[2]);
+    // Guard the degenerate single-point case so sizes stay finite.
+    const radius = Math.max(extent / 2, 1e-3);
+
     const dotPositions  = new Float32Array(n * 3);
     const dotColors     = new Float32Array(n * 3);
     const haloPositions = new Float32Array(n * 3);
@@ -105,9 +120,12 @@ export class Viewer3D {
       haloColors[i*3+1] = col.g;
       haloColors[i*3+2] = col.b;
 
+      // aSize feeds gl_PointSize = aSize * (300.0 / -mv.z), so it is a
+      // world-space radius — not pixels. The old `t * 60 + 6` meant 6-66
+      // METRES per halo, which swallowed the whole scene.
       const t = Math.pow(1 - conf, 1.2);
       haloAlphas[i] = t * 0.35;
-      haloSizes[i]  = t * 60 + 6;
+      haloSizes[i]  = (t * 0.45 + 0.06) * radius;
     }
 
     // Dot cloud (small solid points)
@@ -116,7 +134,7 @@ export class Viewer3D {
       geo.setAttribute("position", new THREE.BufferAttribute(dotPositions, 3));
       geo.setAttribute("color",    new THREE.BufferAttribute(dotColors, 3));
       const mat = new THREE.PointsMaterial({
-        size: 0.04, vertexColors: true, sizeAttenuation: true,
+        size: radius * 0.05, vertexColors: true, sizeAttenuation: true,
       });
       this._dotCloud = new THREE.Points(geo, mat);
       this._scene.add(this._dotCloud);
@@ -164,6 +182,50 @@ export class Viewer3D {
       this._haloCloud = new THREE.Points(geo, mat);
       this._scene.add(this._haloCloud);
     }
+
+    this._fitView(centre, radius, lo[1]);
+  }
+
+  /**
+   * Frame the model: resize the grid, retarget the orbit centre, and pull the
+   * camera back far enough to see everything. Only re-frames when the model's
+   * scale actually changes, so an incremental update never yanks the view out
+   * from under someone who is mid-orbit.
+   */
+  _fitView(centre, radius, minY) {
+    const changed = this._lastRadius === null ||
+                    Math.abs(radius - this._lastRadius) / this._lastRadius > 0.2;
+
+    // Grid tracks the model footprint and sits just under it.
+    this._scene.remove(this._grid);
+    this._grid.geometry.dispose();
+    this._grid = new THREE.GridHelper(radius * 4, 20, 0x222244, 0x1a1a30);
+    this._grid.position.set(centre[0], minY - radius * 0.05, centre[2]);
+    this._scene.add(this._grid);
+
+    this._controls.target.set(centre[0], centre[1], centre[2]);
+
+    if (changed) {
+      // Preserve the viewing direction across refits; use a default on first fit.
+      let dir = new THREE.Vector3(1, 0.75, 1).normalize();
+      if (this._lastRadius !== null) {
+        dir = this._cam.position.clone()
+          .sub(new THREE.Vector3(centre[0], centre[1], centre[2]));
+        if (dir.lengthSq() < 1e-9) dir.set(1, 0.75, 1);
+        dir.normalize();
+      }
+      this._cam.position.set(
+        centre[0] + dir.x * radius * 3.2,
+        centre[1] + dir.y * radius * 3.2,
+        centre[2] + dir.z * radius * 3.2,
+      );
+      this._cam.near = Math.max(radius * 0.01, 1e-4);
+      this._cam.far  = radius * 200;
+      this._cam.updateProjectionMatrix();
+      this._lastRadius = radius;
+    }
+
+    this._controls.update();
   }
 
   /**

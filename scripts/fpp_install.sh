@@ -14,7 +14,9 @@ WWW_DIR="$PLUGIN_DIR/www/blinkymap"
 echo "BlinkyMap: installing on ${PRETTY_NAME:-unknown OS}"
 
 # ── Detect FPP DocumentRoot from running Apache config ────────────────────────
-FPP_DOCROOT=$(grep -rh "^[[:space:]]*DocumentRoot" /etc/apache2/sites-enabled/ 2>/dev/null \
+# -R (not -r): sites-enabled entries are symlinks into sites-available,
+# and plain -r will not follow them.
+FPP_DOCROOT=$(grep -Rh "^[[:space:]]*DocumentRoot" /etc/apache2/sites-enabled/ 2>/dev/null \
     | grep -v "#" | awk '{print $2}' | head -1)
 [ -z "$FPP_DOCROOT" ] && FPP_DOCROOT="/opt/fpp/www"
 echo "BlinkyMap: detected FPP DocumentRoot: ${FPP_DOCROOT}"
@@ -22,6 +24,10 @@ echo "BlinkyMap: detected FPP DocumentRoot: ${FPP_DOCROOT}"
 # ── System dependencies ────────────────────────────────────────────────────────
 echo "BlinkyMap: installing system dependencies..."
 if command -v apt-get &>/dev/null; then
+    # Package lists on an FPP image are often stale; a refresh failure is not fatal.
+    if ! apt-get update -q >/dev/null 2>&1; then
+        echo "  apt-get update failed — continuing with cached lists"
+    fi
     apt-get install -y -q openssl python3-numpy python3-requests 2>&1 | tail -5
 
     # python3-websockets not in Buster repos — try apt, fall back to pip
@@ -50,28 +56,50 @@ mkdir -p "$WWW_DIR/vendor"
 
 THREE_VERSION="0.160.0"
 THREE_BASE="https://cdn.jsdelivr.net/npm/three@${THREE_VERSION}"
+THREE_OK=1
 
-curl -fsSL "${THREE_BASE}/build/three.module.min.js" \
-     -o "$WWW_DIR/vendor/three.module.min.js"
+# A CDN failure must not abort the install — everything except the 3D viewer
+# still works, and the files can be dropped in later.
+curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 15 \
+     "${THREE_BASE}/build/three.module.min.js" \
+     -o "$WWW_DIR/vendor/three.module.min.js" || THREE_OK=0
 
-curl -fsSL "${THREE_BASE}/examples/jsm/controls/OrbitControls.js" \
-     -o "$WWW_DIR/vendor/OrbitControls.js"
+curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 15 \
+     "${THREE_BASE}/examples/jsm/controls/OrbitControls.js" \
+     -o "$WWW_DIR/vendor/OrbitControls.js" || THREE_OK=0
 
-# Patch OrbitControls import to use local three.module
-sed -i "s|from 'three'|from './three.module.min.js'|g" \
-    "$WWW_DIR/vendor/OrbitControls.js"
+# Guard against a truncated or HTML error-page download
+for f in three.module.min.js OrbitControls.js; do
+    if [ ! -s "$WWW_DIR/vendor/$f" ] || head -c 200 "$WWW_DIR/vendor/$f" | grep -qi "<!doctype\|<html"; then
+        THREE_OK=0
+        rm -f "$WWW_DIR/vendor/$f"
+    fi
+done
+
+if [ "$THREE_OK" = "1" ]; then
+    # Patch OrbitControls import to use local three.module
+    sed -i "s|from 'three'|from './three.module.min.js'|g" \
+        "$WWW_DIR/vendor/OrbitControls.js"
+    echo "  Three.js ${THREE_VERSION} installed."
+else
+    echo "  WARNING: Three.js download failed — the 3D Model tab will not render."
+    echo "           Re-run this script once the Pi has internet access."
+fi
 
 # ── Apache alias + WebSocket proxy ─────────────────────────────────────────────
+# Prefer newest PHP-FPM socket. Set before both Apache blocks — the SSL vhost
+# below needs it too.
+PHP_SOCK=$(ls /run/php/php*-fpm.sock 2>/dev/null | sort -rV | head -1)
+[ -z "$PHP_SOCK" ] && PHP_SOCK="/run/php/php7.4-fpm.sock"
+
 echo "BlinkyMap: configuring Apache..."
 if [ -d /etc/apache2/conf-available ]; then
     PLUGIN_NAME="$(basename "$PLUGIN_DIR")"
     CONF="/etc/apache2/conf-available/blinkymap.conf"
 
-    # Prefer newer PHP socket; fall back through known versions
-    PHP_SOCK=$(ls /run/php/php*-fpm.sock 2>/dev/null | sort -rV | head -1)
-    [ -z "$PHP_SOCK" ] && PHP_SOCK="/run/php/php7.4-fpm.sock"
-
     a2enmod proxy proxy_http proxy_wstunnel >/dev/null 2>&1 || true
+
+    a2enmod headers >/dev/null 2>&1 || true
 
     cat > "$CONF" <<APACHECONF
 # Proxy WebSocket at same-origin path so FPP's CSP 'self' allows it
@@ -86,6 +114,14 @@ Alias /plugin/${PLUGIN_NAME} ${PLUGIN_DIR}/www
     DirectoryIndex index.php index.html
     <FilesMatch "\\.php\$">
         SetHandler "proxy:unix:${PHP_SOCK}|fcgi://localhost"
+    </FilesMatch>
+    # FPP serves static assets with 'max-age=31536000, immutable'. That is fine
+    # for the query-versioned JS and CSS, but fatal for the HTML that names those
+    # versions: a cached page keeps requesting last week's ?v= forever, and the
+    # user tests old code no matter how often they reload.
+    <FilesMatch "\\.html\$">
+        Header set Cache-Control "no-store, no-cache, must-revalidate, max-age=0"
+        Header set Pragma "no-cache"
     </FilesMatch>
 </Directory>
 APACHECONF

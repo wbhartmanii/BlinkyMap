@@ -30,57 +30,170 @@ export async function openCamera(videoEl, canvasEl) {
   return { width, height };
 }
 
-/** Grab the current video frame as ImageData (dark background). */
-export function captureBackground(videoEl, canvasEl) {
+/**
+ * Grab a baseline frame with every pixel off.
+ *
+ * Takes the per-channel MAXIMUM across several frames rather than a single
+ * snapshot. A steady light subtracts out of a single frame fine, but anything
+ * that blinks or flickers — a controller status LED, a TV, a phone charger —
+ * is dark in the one frame captured and then appears as a bright positive in
+ * the difference later, which the peak-finder will happily lock onto. Baking
+ * each source in at its brightest guarantees it can never produce a positive
+ * difference, at the cost of slightly desensitising those regions.
+ */
+export async function captureBackground(videoEl, canvasEl, frames = 8, gapMs = 60) {
   const ctx = canvasEl.getContext("2d", { willReadFrequently: true });
-  ctx.drawImage(videoEl, 0, 0, canvasEl.width, canvasEl.height);
-  return ctx.getImageData(0, 0, canvasEl.width, canvasEl.height);
+  const W = canvasEl.width, H = canvasEl.height;
+
+  ctx.drawImage(videoEl, 0, 0, W, H);
+  const acc = ctx.getImageData(0, 0, W, H);
+  const a = acc.data;
+
+  for (let f = 1; f < frames; f++) {
+    await new Promise(r => setTimeout(r, gapMs));
+    ctx.drawImage(videoEl, 0, 0, W, H);
+    const cur = ctx.getImageData(0, 0, W, H).data;
+    for (let i = 0; i < a.length; i += 4) {
+      if (cur[i]     > a[i])     a[i]     = cur[i];
+      if (cur[i + 1] > a[i + 1]) a[i + 1] = cur[i + 1];
+      if (cur[i + 2] > a[i + 2]) a[i + 2] = cur[i + 2];
+    }
+  }
+  return acc;
 }
 
 /**
- * Detect a bright LED in the current frame by subtracting the background.
+ * Detect a lit LED in the current frame by subtracting the baseline.
  *
- * Algorithm:
- *  1. Compute per-pixel luminance difference: lit - bg
- *  2. Threshold at `threshold` (default 30, 0-255)
- *  3. Find weighted centroid of bright pixels
- *  4. Confidence = peak_luminance / 255
+ * Returns a confidence that measures DISCRIMINABILITY, not brightness. The
+ * previous score was peak_luminance/255, which pegged near 1.0 for anything
+ * bright — a reflection, a glow on a neighbouring pixel, or a global exposure
+ * shift all scored ~0.98, so the minimum-confidence gate never rejected
+ * anything and every scan reported every pixel as seen. A pixel genuinely
+ * hidden behind the prop is a normal, useful outcome; reporting it as found
+ * poisons triangulation with a point that is not the pixel.
+ *
+ * Three independent signals, multiplied:
+ *
+ *   sparsity    how little of the frame lit up at all. One LED changes a tiny
+ *               patch; an exposure shift or auto-white-balance change lifts the
+ *               whole frame and scores zero.
+ *   compactness a point source occupies a tiny share of frame. Diffuse glow or
+ *               a whole-frame shift does not.
+ *   uniqueness  penalises a rival peak of similar brightness elsewhere, which
+ *               means the choice between them was arbitrary.
+ *
+ * `purity` (energy inside the detection window over total lit energy) is
+ * reported separately as a scene-quality hint.
  */
-export function detectLED(videoEl, canvasEl, bgImageData, threshold = 30) {
+export function detectLED(videoEl, canvasEl, bgImageData, threshold = 30,
+                          windowFrac = 0.04) {
   const ctx = canvasEl.getContext("2d", { willReadFrequently: true });
   ctx.drawImage(videoEl, 0, 0, canvasEl.width, canvasEl.height);
   const lit = ctx.getImageData(0, 0, canvasEl.width, canvasEl.height);
 
-  const W = canvasEl.width;
-  const H = canvasEl.height;
-  const bg  = bgImageData.data;
-  const lit_d = lit.data;
+  const W = canvasEl.width, H = canvasEl.height, N = W * H;
+  const bg = bgImageData.data, lit_d = lit.data;
 
-  let sumW = 0, sumX = 0, sumY = 0, peakLum = 0;
+  // Pass 1: difference luminance, peak, histogram (for a cheap percentile).
+  const diff = new Float32Array(N);
+  let peakLum = 0, peakIdx = -1, totalEnergy = 0, litCount = 0;
+
+  for (let p = 0, i = 0; p < N; p++, i += 4) {
+    const dr = Math.max(0, lit_d[i]     - bg[i]);
+    const dg = Math.max(0, lit_d[i + 1] - bg[i + 1]);
+    const db = Math.max(0, lit_d[i + 2] - bg[i + 2]);
+    const lum = 0.299 * dr + 0.587 * dg + 0.114 * db;
+    if (lum >= threshold) {
+      diff[p] = lum;
+      totalEnergy += lum;
+      litCount++;
+      if (lum > peakLum) { peakLum = lum; peakIdx = p; }
+    }
+  }
+
+  if (peakIdx < 0) return { found: false, reason: "nothing above threshold" };
+
+  // Sparsity: a single LED lights a tiny patch. If a large share of the frame
+  // moved, the camera re-exposed or white-balanced and the whole difference is
+  // meaningless — 2% of frame is already far more than any point source needs.
+  // A real LED plus the glow it throws on its neighbours can legitimately light
+  // a few percent of frame; only a whole-frame move means the camera re-exposed.
+  const litFrac  = litCount / N;
+  const sparsity = Math.max(0, Math.min(1, 1 - litFrac / 0.08));
+
+  // Pass 2: measure how far the target's own blob extends, in rings of `rad`
+  // around the peak. A bright LED saturates, so its core holds many pixels at
+  // the identical maximum value; without measuring the extent, that halo is
+  // indistinguishable from a rival light source and every strong detection
+  // scores zero uniqueness against itself.
+  const px = peakIdx % W, py = (peakIdx / W) | 0;
+  const rad = Math.max(10, Math.round(Math.min(W, H) * windowFrac));
+  const BANDS = 24;
+  const bandMax = new Float32Array(BANDS);
 
   for (let y = 0; y < H; y++) {
+    const dy = y - py;
     for (let x = 0; x < W; x++) {
-      const i = (y * W + x) * 4;
-      // Luminance of difference (clamped to 0)
-      const dr = Math.max(0, lit_d[i]   - bg[i]);
-      const dg = Math.max(0, lit_d[i+1] - bg[i+1]);
-      const db = Math.max(0, lit_d[i+2] - bg[i+2]);
-      const lum = 0.299 * dr + 0.587 * dg + 0.114 * db;
+      const lum = diff[y * W + x];
+      if (lum <= 0) continue;
+      const dx = x - px;
+      const b = Math.min(BANDS - 1, Math.floor(Math.sqrt(dx * dx + dy * dy) / rad));
+      if (lum > bandMax[b]) bandMax[b] = lum;
+    }
+  }
 
-      if (lum >= threshold) {
-        sumW += lum;
-        sumX += x * lum;
-        sumY += y * lum;
-        if (lum > peakLum) peakLum = lum;
+  // The blob ends at the first ring whose brightest pixel has fallen to half.
+  let blobBands = 1;
+  while (blobBands < BANDS && bandMax[blobBands] >= peakLum * 0.5) blobBands++;
+
+  const winR  = blobBands * rad;          // centroid window covers the whole blob
+  const exclR = winR * 2;                 // rivals must be clear of it
+  const winR2 = winR * winR, exclR2 = exclR * exclR;
+  const half  = peakLum * 0.5;
+
+  // Pass 3: centroid over the blob, area of its bright core, brightest rival.
+  let sumW = 0, sumX = 0, sumY = 0, rival = 0;
+  for (let y = 0; y < H; y++) {
+    const dy = y - py;
+    for (let x = 0; x < W; x++) {
+      const lum = diff[y * W + x];
+      if (lum <= 0) continue;
+      const dx = x - px;
+      const d2 = dx * dx + dy * dy;
+      if (d2 <= winR2) {
+        sumW += lum; sumX += x * lum; sumY += y * lum;
+      } else if (d2 > exclR2 && lum > rival) {
+        rival = lum;
       }
     }
   }
 
-  if (sumW < 1e-6) return { found: false };
+  if (sumW < 1e-6) return { found: false, reason: "no energy in window" };
 
-  const cx   = sumX / sumW;
-  const cy   = sumY / sumW;
-  const conf = Math.min(peakLum / 255, 1.0);
+  // Compactness from the falloff profile, not absolute area. A point source
+  // halves within one ring however close it is; diffuse glow stays bright over
+  // many. An area threshold would reject a legitimate LED simply for being
+  // photographed from close range.
+  const compactness = Math.max(0, Math.min(1, 1 - (blobBands - 1) / 4));
 
-  return { found: true, cx, cy, conf };
+  // Only penalise a rival bright enough to have been a plausible alternative.
+  // A neighbour glowing at a third of the peak is normal on any real prop and
+  // must not count against the reading; a rival at 80% means the peak-finder's
+  // choice between them was close to arbitrary.
+  const rivalFrac  = peakLum > 0 ? rival / peakLum : 1;
+  const uniqueness = Math.max(0, Math.min(1, (1 - rivalFrac) / 0.5));
+
+  return {
+    found: true,
+    cx: sumX / sumW,
+    cy: sumY / sumW,
+    // Geometric mean, not a product: three independent 0.85s describe a good
+    // detection, but their product is 0.61 and reads like a bad one. The mean
+    // keeps a single zero decisive while staying interpretable.
+    conf: Math.cbrt(sparsity * compactness * uniqueness),
+    purity: sumW / totalEnergy,
+    peak: peakLum,
+    sparsity, compactness, uniqueness,
+  };
 }

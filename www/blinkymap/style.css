@@ -419,3 +419,154 @@ input[type="range"]::-moz-range-thumb {
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #ffffff25; border-radius: 4px; }
+
+/* ── Role chooser ─────────────────────────────────────────────────────────── */
+.role-card {
+  display: flex; align-items: center; gap: 1rem;
+  padding: 1rem; margin: 0.75rem 1rem;
+  background: #16162a; border: 1px solid #2a2a45; border-radius: 10px;
+  text-decoration: none; color: inherit;
+}
+.role-card:active { background: #1d1d38; }
+.role-icon  { font-size: 2rem; line-height: 1; }
+.role-title { font-size: 1.1rem; font-weight: 600; color: #e8e8ff; }
+.role-desc  { font-size: 0.85rem; color: #9a9ac0; margin-top: 0.2rem; }
+.dot-grey   { background: #555577; }
+
+/* ── Compass readout (sensor) ─────────────────────────────────────────────── */
+.compass-readout { text-align: center; padding: 0.5rem 0 0.25rem; }
+.compass-angle {
+  font-size: 3.4rem; font-weight: 700; line-height: 1;
+  color: #69f0ae; font-variant-numeric: tabular-nums;
+}
+.compass-sub { font-size: 0.8rem; color: #9a9ac0; margin-top: 0.2rem; }
+.compass-raw {
+  text-align: center; font-size: 0.8rem; color: #7a7aa0;
+  margin: 0.35rem 0 0.6rem;
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════════
+   SENSOR — single screen. Header / stage / status / setup / controls stack
+   vertically and never scroll: the stage absorbs whatever space is left so
+   aiming, the angle readout and the Scan button are visible simultaneously.
+   ══════════════════════════════════════════════════════════════════════════ */
+body.sensor-body {
+  height: 100dvh; margin: 0;
+  display: flex; flex-direction: column; overflow: hidden;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+#sensor-header {
+  display: flex; align-items: baseline; gap: 0.4rem;
+  padding: 0.4rem 0.7rem; background: #12121f;
+  border-bottom: 1px solid #23233a; flex: 0 0 auto;
+}
+#hud-angle {
+  font-size: 1.9rem; font-weight: 700; line-height: 1;
+  color: #69f0ae; font-variant-numeric: tabular-nums;
+}
+#hud-angle-label { font-size: 0.7rem; color: #8a8ab0; }
+#sensor-header .spacer { flex: 1; }
+#btn-setup-toggle {
+  background: none; border: none; color: #9a9ac0;
+  font-size: 1.2rem; padding: 0 0.3rem; cursor: pointer;
+}
+#btn-setup-toggle.open { color: #7c4dff; }
+
+/* Stage grows/shrinks; min-height:0 is what lets it actually shrink in flex */
+#stage { flex: 1 1 auto; min-height: 0; position: relative; padding: 0.4rem 0.7rem; }
+/* Absolutely positioned rather than height:100%: a percentage height resolved
+   through a flex chain is unreliable, and when it collapses the video shrinks
+   while the overlay does not. */
+.sensor-body #cam-wrap {
+  position: absolute; inset: 0.4rem 0.7rem;
+  border-radius: 10px; overflow: hidden;
+  background: #0d0d14; border: 1px solid #2a2a45;
+}
+
+/* Video and overlay are pinned to the SAME rectangle and given the same
+   object-fit. The overlay's backing store is the camera's intrinsic frame, so
+   the browser letterboxes both identically and detector coordinates need no
+   conversion. Anything that sizes one differently from the other — such as the
+   max-height that used to cap the video — silently separates the marker from
+   the image, which is exactly what happened before.
+   The long-hand resets are deliberate: shared rules elsewhere set display,
+   margin and max-height on #cam-preview and outrank a bare element selector. */
+.sensor-body #cam-wrap video,
+.sensor-body #cam-wrap canvas {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  max-width: none; max-height: none;
+  margin: 0; border-radius: 0;
+  object-fit: contain;
+  display: block;
+}
+.sensor-body #cam-wrap canvas { pointer-events: none; }
+#cam-placeholder {
+  position: absolute; inset: 0; display: flex;
+  align-items: center; justify-content: center;
+  color: #6a6a90; font-size: 0.85rem; text-align: center; padding: 1rem;
+}
+#cam-wrap.live #cam-placeholder { display: none; }
+
+.hud-chip {
+  position: absolute; left: 1.1rem; right: 1.1rem; bottom: 0.9rem;
+  padding: 0.4rem 0.6rem; border-radius: 8px; font-size: 0.8rem;
+  text-align: center; background: rgba(10,10,24,0.82); backdrop-filter: blur(4px);
+}
+
+body.sensor-body #cam-status-bar {
+  flex: 0 0 auto; margin: 0 0.7rem 0.35rem; font-size: 0.78rem;
+  padding: 0.35rem 0.5rem; border-radius: 6px;
+}
+
+/* Setup collapses to nothing rather than scrolling the page */
+#setup-strip {
+  flex: 0 0 auto; overflow: hidden; max-height: 0;
+  transition: max-height 0.2s ease; padding: 0 0.7rem;
+  border-top: 1px solid #23233a;
+}
+#setup-strip.open { max-height: 60vh; overflow-y: auto; padding: 0.5rem 0.7rem; }
+.setup-row { display: flex; gap: 0.5rem; margin-bottom: 0.45rem; }
+.setup-row button { flex: 1; margin: 0; }
+
+#controls { flex: 0 0 auto; padding: 0 0.7rem 0.5rem; }
+.field-row { display: flex; gap: 0.6rem; margin-bottom: 0.45rem; }
+.inline-field {
+  flex: 1; display: flex; align-items: center; gap: 0.35rem;
+  font-size: 0.78rem; color: #9a9ac0; margin: 0;
+}
+.inline-field input {
+  flex: 1; min-width: 0; margin: 0;
+  padding: 0.45rem 0.5rem; font-size: 1rem;
+}
+#controls .btn-primary.wide { margin: 0; padding: 0.9rem; font-size: 1.05rem; }
+#scan-hint:empty { display: none; }
+#scan-hint { margin: 0.3rem 0 0; }
+.progress-foot {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 0.6rem; margin-top: 0.35rem;
+}
+.progress-foot span { font-size: 0.8rem; color: #9a9ac0; }
+.progress-foot button { margin: 0; padding: 0.4rem 0.9rem; }
+body.sensor-body #last-result { margin: 0.4rem 0 0; font-size: 0.78rem; }
+
+/* Overrides for the compact sensor screen. The shared button/label/input rules
+   are sized for the scrolling control UI and are too tall to fit a phone
+   alongside a camera preview. */
+#setup-strip .btn-primary,
+#setup-strip .btn-secondary { padding: 9px 12px; font-size: 0.88rem; }
+.inline-field { flex-direction: row !important; margin-bottom: 0 !important; }
+.inline-field input[type="number"] { padding: 8px 10px; }
+#setup-strip .slider-hint { margin: 0.3rem 0 0; font-size: 0.72rem; }
+#setup-strip label { margin-bottom: 0; }
+#build-tag { font-size: 0.62rem; color: #6a6a90; letter-spacing: 0.03em; }
+
+/* Next-step banner: the single most important thing after a scan completes. */
+body.sensor-body #last-result.next-step {
+  background: #241a4d; border: 1px solid #7c4dff;
+  color: #e8e8ff; font-size: 0.85rem; line-height: 1.35;
+}
+body.sensor-body #last-result.next-step strong { color: #b39dff; }
+.hud-chip { font-weight: 600; border: 1px solid #ffffff22; }

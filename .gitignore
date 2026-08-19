@@ -17,3 +17,6 @@ www/blinkymap/vendor/
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code personal settings (machine-specific, not for the repo)
+.claude/settings.local.json

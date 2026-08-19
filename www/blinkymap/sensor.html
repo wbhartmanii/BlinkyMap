@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>BlinkyMap Sensor</title>
+  <link rel="stylesheet" href="style.css?v=30" />
+</head>
+<body class="sensor-body">
+
+<!--
+  Single-screen layout. Everything needed to take a scan is visible at once:
+  aim in the preview, read the angle in the header, confirm distance, tap Scan.
+  Setup controls collapse once done — they are used once per session, not once
+  per position.
+-->
+<header id="sensor-header">
+  <span id="hud-angle">&mdash;</span>
+  <span id="hud-angle-label">around model</span>
+  <span class="spacer"></span>
+  <div id="unit-toggle">
+    <button class="unit-btn active" data-unit="m">m</button>
+    <button class="unit-btn" data-unit="ft">ft</button>
+  </div>
+  <button id="btn-setup-toggle" title="Setup">&#9881;</button>
+  <span id="build-tag"></span>
+  <span id="ws-indicator" class="dot dot-red" title="WebSocket status"></span>
+</header>
+
+<!-- Camera stage — takes whatever vertical space is left over -->
+<div id="stage">
+  <div id="cam-wrap">
+    <video id="cam-preview" autoplay playsinline muted></video>
+    <canvas id="cam-overlay"></canvas>
+    <div id="cam-placeholder">Tap &#9881; to open the camera</div>
+  </div>
+  <div id="compass-guide" class="hud-chip" style="display:none"></div>
+</div>
+
+<div id="cam-status-bar" class="cam-status cam-status-off">Camera: not open</div>
+
+<!-- Collapsible setup: used once, then out of the way -->
+<div id="setup-strip">
+  <div class="setup-row">
+    <button class="btn-secondary" id="btn-open-camera">Open Camera</button>
+    <button class="btn-secondary" id="btn-enable-compass">Enable Compass</button>
+  </div>
+  <div class="setup-row">
+    <button class="btn-primary" id="btn-set-reference">Set 0&deg; here</button>
+    <button class="btn-secondary" id="btn-clear-reference" style="display:none">Clear 0&deg;</button>
+  </div>
+  <div id="compass-raw" class="compass-raw"></div>
+  <div id="compass-fallback" style="display:none">
+    <p class="slider-hint" id="compass-fallback-msg"></p>
+    <label class="inline-field">Angle&deg;
+      <input id="sess-angle" type="number" value="0" min="0" max="359" step="5" />
+    </label>
+  </div>
+  <p class="slider-hint">
+    Keep the screen awake &mdash; mobile browsers pause JavaScript on lock.
+    <a href="./?pick=1">change role</a>
+  </p>
+</div>
+
+<!-- Working controls: always visible, thumb-reachable -->
+<div id="controls">
+  <div class="field-row">
+    <label class="inline-field">Dist&nbsp;<span class="unit-sfx">m</span>
+      <input id="sess-dist" type="number" value="2.0" min="0.5" max="20" step="0.5" />
+    </label>
+    <label class="inline-field">High&nbsp;<span class="unit-sfx">m</span>
+      <input id="sess-height" type="number" value="1.5" min="0.2" max="10" step="0.1" />
+    </label>
+  </div>
+
+  <button class="btn-primary wide" id="btn-scan-here">Scan From Here</button>
+  <p id="scan-hint" class="slider-hint"></p>
+
+  <div id="scan-progress-block" style="display:none">
+    <div class="progress-bar-wrap"><div id="scan-progress-bar" class="progress-bar"></div></div>
+    <div class="progress-foot">
+      <span id="scan-progress-label">0 / 0</span>
+      <button class="btn-danger" id="btn-stop-scan">Stop</button>
+    </div>
+  </div>
+
+  <div id="last-result" class="cam-status" style="display:none"></div>
+</div>
+
+<!-- Offscreen: detection scratch canvas, plus nodes sensor.js still writes to -->
+<canvas id="cam-canvas" style="display:none"></canvas>
+<span id="compass-block" style="display:none"></span>
+<span id="compass-angle" style="display:none"></span>
+<span id="compass-sub" style="display:none"></span>
+
+<script type="module" src="sensor.js?v=30"></script>
+</body>
+</html>

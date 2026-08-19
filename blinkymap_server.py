@@ -136,6 +136,21 @@ class E131Output:
             data[ch], data[ch+1], data[ch+2] = self._color
         self._send_raw(bytes(data))
 
+    def set_pattern(self, pattern_hex: str, pixel_count: int):
+        """Per-pixel colours in one frame — native to E1.31, no chase needed."""
+        data = bytearray(self._buf_len)
+        for i in range(pixel_count):
+            ch = self._offset + i * 3
+            if ch + 2 >= self._buf_len:
+                break
+            triplet = pattern_hex[i * 6:(i + 1) * 6]
+            if len(triplet) < 6:
+                break
+            data[ch]     = int(triplet[0:2], 16)
+            data[ch + 1] = int(triplet[2:4], 16)
+            data[ch + 2] = int(triplet[4:6], 16)
+        self._send_raw(bytes(data))
+
     def all_off(self):
         self._send_raw(bytes(self._buf_len))
 
@@ -170,6 +185,25 @@ class FPPOutput:
             "args": ["100", "RGB Single Color",
                      f"{ch_start}-{ch_end}", f"#{r:02x}{g:02x}{b:02x}"],
         }, timeout=3)
+
+    def set_pattern(self, pattern_hex: str, pixel_count: int):
+        """Drive every pixel to its own colour in one shot.
+
+        FPP's "Custom Chase" lays colorPattern out spatially across the string
+        (TestPatternRGBChase::SetupTest), so a pattern holding exactly one RGB
+        triplet per pixel gives each its own colour with no repetition. The
+        chase would rotate the pattern every cycleMS, so cycleMS is set far
+        beyond any capture window to hold it still.
+        """
+        ch_start = self._start
+        ch_end = self._start + pixel_count * 3 - 1
+        self._sess.post(self._url, json={
+            "command": "Test Start",
+            "multisyncCommand": True,
+            "multisyncHosts": "",
+            "args": ["600000", "Custom Chase", f"{ch_start}-{ch_end}",
+                     pattern_hex, "3"],
+        }, timeout=5)
 
     def all_off(self):
         self._sess.post(self._url, json={
@@ -207,6 +241,77 @@ def _make_output(cfg: "ControllerConfig"):
     return E131Output(cfg.host, cfg.start_channel, cfg.pixel_count, cfg.pixel_color)
 
 
+# ── Coded (structured-light) scanning ─────────────────────────────────────────
+#
+# Rather than lighting one pixel per frame, light EVERY pixel in every frame and
+# colour each by one digit of its base-3 index: 0=red, 1=green, 2=blue. A pixel
+# is then located by intersecting the matching colour channel across frames —
+# only the true pixel satisfies every constraint.
+#
+# This is the scheme xLights uses in GenerateCustomModelDialog. It needs
+# log3(n)+2 frames instead of n, but the real gains are elsewhere: a reflection
+# must match the pixel's colour in EVERY frame to survive the intersection, an
+# occluded pixel leaves nothing surviving (so "not seen" is a geometric fact,
+# not a tuned threshold), and every frame lights the same number of LEDs so the
+# camera never re-exposes between frames.
+#
+# The trailing two digits are a checksum, so a misread is detectable.
+
+def coded_digit_count(pixel_count: int) -> int:
+    """Frames needed: base-3 digits of pixel_count, plus two check digits."""
+    count, p = 0, max(pixel_count, 1)
+    while p:
+        p //= 3
+        count += 1
+    return count + 2
+
+
+def coded_word(index: int, digits: int) -> str:
+    """Base-3 code for a 1-based pixel index, with xLights' two check digits.
+
+    check = 2 - (digitsum % 3), then (check + 1) % 3. Left-padded so every
+    pixel's word is the same length, which is what makes the frames align.
+    """
+    body, total, n = "", 0, index
+    while n > 0:
+        r = n % 3
+        body = str(r) + body
+        total += r
+        n //= 3
+    body = body or "0"
+    check = 2 - (total % 3)
+    word = body + str(check) + str((check + 1) % 3)
+    return word.rjust(digits, "0")
+
+
+def coded_word_valid(word: str) -> bool:
+    """Verify the two check digits — catches a misread rather than trusting it."""
+    if len(word) < 3:
+        return False
+    body, c1, c2 = word[:-2], int(word[-2]), int(word[-1])
+    total = sum(int(d) for d in body)
+    return c1 == 2 - (total % 3) and c2 == (c1 + 1) % 3
+
+
+# Digit -> colour. Full-intensity primaries keep the three channels separable.
+_CODE_COLOURS = {0: (255, 0, 0), 1: (0, 255, 0), 2: (0, 0, 255)}
+
+
+def coded_frame_pattern(pixel_count: int, digit: int, digits: int) -> str:
+    """Hex colour pattern for one frame: one RGB triplet per pixel, in order.
+
+    FPP's "Custom Chase" lays this out spatially across the string (see
+    TestPatternRGBChase::SetupTest), so a pattern holding exactly pixel_count
+    triplets gives every pixel its own colour with no repetition.
+    """
+    out = []
+    for i in range(pixel_count):
+        d = int(coded_word(i + 1, digits)[digit])
+        r, g, b = _CODE_COLOURS[d]
+        out.append(f"{r:02x}{g:02x}{b:02x}")
+    return "".join(out).upper()
+
+
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 @dataclass
@@ -217,6 +322,14 @@ class ControllerConfig:
     inter_pixel_delay: float = 0.15
     pixel_color: Tuple[int, int, int] = (255, 255, 255)
     output_mode: str = "auto"    # "auto" | "fpp" | "e131"
+    # Detection settings: configured on the control UI, applied on the sensor.
+    min_conf: float = 0.5
+    hfov_deg: float = 60.0
+    # Height of the prop's centre above the floor. The camera is aimed here, so
+    # assuming it is half the camera height is only right by coincidence — a
+    # four-position scan measured 7px of reprojection error on that assumption
+    # alone. Negative means "use the old half-camera-height guess".
+    target_height_m: float = -1.0
 
 
 # ── Camera / session geometry ─────────────────────────────────────────────────
@@ -230,6 +343,9 @@ class SessionConfig:
     hfov_deg: float = 60.0
     img_width: int = 1280
     img_height: int = 720
+    # Where the camera is aimed, in world height. Negative -> fall back to the
+    # old assumption of half the camera height.
+    target_height_m: float = -1.0
 
 
 @dataclass
@@ -250,15 +366,26 @@ def _make_K(width: int, height: int, hfov_deg: float) -> np.ndarray:
 
 
 def _look_at_R(eye: np.ndarray, target: np.ndarray) -> np.ndarray:
+    """Camera rotation with image axes: x right, y down, z forward.
+
+    The cross-product order matters and was wrong. With z forward and world up
+    (0,1,0), `cross(z, up)` yields (-1,0,0) — the camera's "right" axis pointed
+    LEFT, so every reconstruction came out mirrored. Measured on a real
+    four-position scan, correcting it took median reprojection error from
+    118.6px to 69.0px at the same field of view.
+
+    `cross(up, z)` gives right; `cross(x, z)` then gives down, which is what
+    image coordinates need since v increases downward.
+    """
     z = target - eye
     z /= np.linalg.norm(z)
     up = np.array([0.0, 1.0, 0.0])
-    x = np.cross(z, up)
-    if np.linalg.norm(x) < 1e-6:
+    x = np.cross(up, z)
+    if np.linalg.norm(x) < 1e-6:      # looking straight up or down
         up = np.array([0.0, 0.0, 1.0])
-        x = np.cross(z, up)
+        x = np.cross(up, z)
     x /= np.linalg.norm(x)
-    y = np.cross(z, x)
+    y = np.cross(x, z)
     return np.vstack([x, y, z])
 
 
@@ -270,7 +397,9 @@ def _projection_matrix(sess: SessionConfig) -> np.ndarray:
         sess.height_m,
         sess.distance_m * math.cos(rad),
     ])
-    target = np.array([0.0, sess.height_m * 0.5, 0.0])
+    aim_y = (sess.target_height_m if sess.target_height_m >= 0.0
+             else sess.height_m * 0.5)
+    target = np.array([0.0, aim_y, 0.0])
     R = _look_at_R(eye, target)
     t = -R @ eye
     Rt = np.hstack([R, t.reshape(3, 1)])
@@ -386,7 +515,9 @@ class BlinkyModel:
                 # All pairs → triangulate, take median
                 candidates: List[np.ndarray] = []
                 reproj_errors: List[float] = []
-                paired_projections: List[Tuple[np.ndarray, SessionConfig]] = []
+                # Track by session id — projection matrices are numpy arrays and
+                # can't be compared with `in` (ambiguous truth value).
+                paired_sids: List[int] = []
 
                 for i in range(len(obs)):
                     for j in range(i + 1, len(obs)):
@@ -403,15 +534,14 @@ class BlinkyModel:
                             err_a = _reprojection_error(P_a, X, (det_a.cx, det_a.cy))
                             err_b = _reprojection_error(P_b, X, (det_b.cx, det_b.cy))
                             reproj_errors.append((err_a + err_b) / 2.0)
-                            if (P_a, sc_a) not in paired_projections:
-                                paired_projections.append((P_a, sc_a))
-                            if (P_b, sc_b) not in paired_projections:
-                                paired_projections.append((P_b, sc_b))
+                            for sid_seen in (sid_a, sid_b):
+                                if sid_seen not in paired_sids:
+                                    paired_sids.append(sid_seen)
 
                 if candidates:
                     pos = np.median(np.array(candidates), axis=0)
                     mean_err = float(np.median(reproj_errors))
-                    spread = _angular_spread(paired_projections)
+                    spread = _angular_spread([proj[s_id] for s_id in paired_sids])
                     n = len(obs)
                     coverage = min(n / max(len(self.sessions), 1), 1.0)
                     # Normalise reprojection error (0px→1.0, 20px→0.0)
@@ -442,6 +572,24 @@ class BlinkyModel:
         mean_conf = float(np.mean(confs)) if confs else 0.0
         overall = 0.5 * coverage + 0.5 * mean_conf
 
+        # Which of the three confidence terms is actually holding the score
+        # down? Without this the UI can only guess, and its guess ("add more
+        # angles") is wrong whenever spread is already saturated.
+        reproj = [pr.reprojection_error for pr in self.results.values()
+                  if pr.position is not None]
+        mean_reproj = float(np.median(reproj)) if reproj else 0.0
+        spread = _angular_spread([(None, sc) for sc, _ in self.sessions.values()])
+        accuracy = max(0.0, 1.0 - mean_reproj / 20.0)
+
+        if coverage < 0.9:
+            limiting = "coverage"
+        elif spread < 0.5:
+            limiting = "spread"
+        elif accuracy < 0.5:
+            limiting = "accuracy"
+        else:
+            limiting = "none"
+
         if overall >= 0.80:
             grade = "Excellent"
         elif overall >= 0.60:
@@ -456,6 +604,10 @@ class BlinkyModel:
             "grade": grade,
             "coverage": round(coverage, 3),
             "mean_confidence": round(mean_conf, 3),
+            "spread": round(spread, 3),
+            "reproj_px": round(mean_reproj, 1),
+            "limiting": limiting,
+            "sessions": len(self.sessions),
             **grades,
         }
 
@@ -682,29 +834,118 @@ class BlinkyServer:
         self.current_session: Optional[SessionConfig] = None
         self.scan_task: Optional[asyncio.Task] = None
         self.test_task: Optional[asyncio.Task] = None
-        self.clients: Set[WebSocketServerProtocol] = set()
+        # ws -> role ("control" | "sensor" | "unknown"). Roles are declared by
+        # the client via a "hello" message; only sensors may report detections.
+        self.clients: Dict[WebSocketServerProtocol, str] = {}
+
+        # Latest pose reported by a sensor client (phone compass).
+        self.sensor_heading: Optional[float] = None      # raw compass degrees
+        self.sensor_accuracy: Optional[float] = None     # +/- degrees, if known
+        self.heading_reference: Optional[float] = None   # heading the user called 0 deg
 
         # Per-pixel detection response queue — fed by incoming "detection"/"no_detection"
         self._detection_queue: asyncio.Queue = asyncio.Queue()
 
-    async def broadcast(self, msg: dict):
-        if self.clients:
+        # Signalled by the sensor once its multi-frame baseline is captured.
+        self._bg_ready: asyncio.Event = asyncio.Event()
+
+        # Coded-scan handshakes: one per captured frame, then the batch result.
+        self._frame_captured: asyncio.Event = asyncio.Event()
+        self._coded_results: asyncio.Queue = asyncio.Queue()
+
+    async def broadcast(self, msg: dict, role: Optional[str] = None):
+        targets = [c for c, r in self.clients.items() if role is None or r == role]
+        if targets:
             data = json.dumps(msg)
-            await asyncio.gather(*(c.send(data) for c in self.clients), return_exceptions=True)
+            await asyncio.gather(*(c.send(data) for c in targets), return_exceptions=True)
+
+    def _sensor_angle(self) -> Optional[float]:
+        """Compass heading converted to an angle around the model.
+
+        Aiming the camera at the prop means heading rotates degree-for-degree
+        with position around it, so a relative measurement against a reference
+        the user sets at their first position needs no true-north calibration
+        and cancels any constant magnetic bias.
+        """
+        if self.sensor_heading is None or self.heading_reference is None:
+            return None
+        return (self.sensor_heading - self.heading_reference) % 360.0
+
+    def _sensor_config(self) -> dict:
+        """Detection settings the sensor needs; owned by the control UI."""
+        return {
+            "type": "sensor_config",
+            "min_conf": self.config.min_conf,
+            "hfov_deg": self.config.hfov_deg,
+            "target_height": self.config.target_height_m,
+        }
+
+    def _sensor_summary(self) -> dict:
+        return {
+            "type": "sensor_status",
+            "connected": any(r == "sensor" for r in self.clients.values()),
+            "heading": self.sensor_heading,
+            "accuracy": self.sensor_accuracy,
+            "reference": self.heading_reference,
+            "angle": self._sensor_angle(),
+        }
 
     async def handler(self, ws: WebSocketServerProtocol):
-        self.clients.add(ws)
+        self.clients[ws] = "unknown"
         log.info("Client connected (%d total)", len(self.clients))
         try:
             # Send current state summary
             await ws.send(json.dumps({"type": "status", "message": "BlinkyMap ready"}))
+
+            # Replay existing model state so a reconnecting or second client
+            # (e.g. the laptop when the phone holds the camera) sees the model
+            # that has already been built, instead of an empty viewer.
+            if self.model.sessions:
+                # Session cards live only in client memory, so a reload used to
+                # leave sessions alive on the server but invisible (and so
+                # undeletable) in the UI — silently polluting every model.
+                await ws.send(json.dumps({
+                    "type": "session_list",
+                    "sessions": [
+                        {
+                            "session":  sid,
+                            "detected": len(dets),
+                            "total":    self.model.pixel_count or self.config.pixel_count,
+                            "angle":    sc.angle_deg,
+                            "distance": sc.distance_m,
+                            "height":   sc.height_m,
+                            "detections": {
+                                i: {"cx": round(d.cx, 1), "cy": round(d.cy, 1),
+                                    "conf": round(d.conf, 3)}
+                                for i, d in dets.items()
+                            },
+                        }
+                        for sid, (sc, dets) in sorted(self.model.sessions.items())
+                    ],
+                }))
+
+            if self.model.results:
+                await ws.send(json.dumps({
+                    "type": "model", "pixels": self.model.to_json_pixels(),
+                }))
+                await ws.send(json.dumps({
+                    "type": "confidence", **self.model.model_confidence(),
+                }))
+                await ws.send(json.dumps({
+                    "type": "next_suggestion",
+                    **suggest_next_angle(self.model, self.model.sessions),
+                }))
             async for raw in ws:
                 await self._handle_message(ws, raw)
         except Exception as e:
             log.debug("Client error: %s", e)
         finally:
-            self.clients.discard(ws)
+            self.clients.pop(ws, None)
             log.info("Client disconnected (%d total)", len(self.clients))
+            if not any(r == "sensor" for r in self.clients.values()):
+                self.sensor_heading = None
+                self.sensor_accuracy = None
+            await self.broadcast(self._sensor_summary(), role="control")
 
     async def _handle_message(self, ws: WebSocketServerProtocol, raw: str):
         try:
@@ -714,27 +955,86 @@ class BlinkyServer:
 
         t = msg.get("type")
 
-        if t == "set_config":
+        if t == "hello":
+            role = msg.get("role")
+            if role not in ("control", "sensor"):
+                role = "unknown"
+            self.clients[ws] = role
+            log.info("Client declared role=%s (%d total)", role, len(self.clients))
+            if role == "sensor":
+                await ws.send(json.dumps(self._sensor_config()))
+            await self.broadcast(self._sensor_summary(), role="control")
+
+        elif t == "pose":
+            # Sensor (phone) reporting compass heading. Ignored from anyone else.
+            if self.clients.get(ws) != "sensor":
+                return
+            h = msg.get("heading")
+            self.sensor_heading  = float(h) % 360.0 if h is not None else None
+            acc = msg.get("accuracy")
+            self.sensor_accuracy = float(acc) if acc is not None else None
+            if msg.get("set_reference") and self.sensor_heading is not None:
+                self.heading_reference = self.sensor_heading
+                log.info("Heading reference set to %.1f deg", self.heading_reference)
+            await self.broadcast(self._sensor_summary())
+
+        elif t == "background_ready":
+            self._bg_ready.set()
+
+        elif t == "coded_frame_captured":
+            self._frame_captured.set()
+
+        elif t == "coded_detections":
+            if self.clients.get(ws) == "control":
+                return
+            await self._coded_results.put(msg.get("detections") or {})
+
+        elif t == "start_coded_scan":
+            if self.scan_task and not self.scan_task.done():
+                await ws.send(json.dumps({"type": "status", "message": "Scan already running"}))
+                return
+            if not self.current_session:
+                await ws.send(json.dumps({"type": "status",
+                                          "message": "Set session position first"}))
+                return
+            self.scan_task = asyncio.create_task(self._run_coded_scan())
+
+        elif t == "clear_reference":
+            self.heading_reference = None
+            await self.broadcast(self._sensor_summary())
+
+        elif t == "set_config":
             self.config.host              = msg.get("host", self.config.host)
             self.config.start_channel     = int(msg.get("start_ch", self.config.start_channel))
             self.config.pixel_count       = int(msg.get("pixel_count", self.config.pixel_count))
             self.config.inter_pixel_delay = float(msg.get("delay", self.config.inter_pixel_delay))
             self.config.output_mode       = msg.get("output_mode", self.config.output_mode)
+            self.config.min_conf          = float(msg.get("min_conf", self.config.min_conf))
+            self.config.hfov_deg          = float(msg.get("hfov_deg", self.config.hfov_deg))
+            self.config.target_height_m   = float(msg.get("target_height",
+                                                          self.config.target_height_m))
             self.model.pixel_count        = self.config.pixel_count
+            await self.broadcast(self._sensor_config(), role="sensor")
             await ws.send(json.dumps({"type": "status", "message": "Config saved"}))
             asyncio.create_task(self._probe_controller(ws))
 
         elif t == "set_session":
             sid = _new_session_id()
+            # A compass-derived angle from the sensor wins over a typed one.
+            angle = msg.get("angle", 0)
+            if msg.get("angle_source") == "compass":
+                measured = self._sensor_angle()
+                if measured is not None:
+                    angle = measured
             self.current_session = SessionConfig(
                 session_id=sid,
-                angle_deg=float(msg.get("angle", 0)),
+                angle_deg=float(angle),
                 distance_m=float(msg.get("distance", 2.0)),
                 height_m=float(msg.get("height", 1.5)),
-                hfov_deg=float(msg.get("hfov_deg", self.current_session.hfov_deg
-                                       if self.current_session else 60.0)),
+                hfov_deg=float(msg.get("hfov_deg", self.config.hfov_deg)),
                 img_width=int(msg.get("img_width", 1280)),
                 img_height=int(msg.get("img_height", 720)),
+                target_height_m=self.config.target_height_m,
             )
             self.model.add_session(self.current_session)
             await ws.send(json.dumps({"type": "status",
@@ -760,6 +1060,11 @@ class BlinkyServer:
             self.scan_task = asyncio.create_task(self._run_scan())
 
         elif t == "detection":
+            # Structurally prevent a control client (e.g. a laptop whose webcam
+            # got opened) from racing the real sensor's observations.
+            if self.clients.get(ws) == "control":
+                log.debug("Ignoring detection from a control client")
+                return
             idx = int(msg["index"])
             det = Detection(
                 cx=float(msg["cx"]),
@@ -771,7 +1076,16 @@ class BlinkyServer:
 
         elif t == "no_detection":
             msg_idx = int(msg.get("index", -1))
-            log.debug("No-detection received: pixel %d (not queued; server uses timeout)", msg_idx)
+            # Log why, at INFO: a scan that finds nothing is otherwise silent,
+            # and the confidence breakdown is the only way to tell a genuinely
+            # hidden pixel from a mis-tuned gate.
+            c = msg.get("conf")
+            if c is not None:
+                log.info("Pixel %d rejected: conf=%.2f (sparse=%.2f compact=%.2f unique=%.2f)",
+                         msg_idx, c, msg.get("sparsity") or 0.0,
+                         msg.get("compactness") or 0.0, msg.get("uniqueness") or 0.0)
+            else:
+                log.debug("No-detection: pixel %d (not queued; server uses timeout)", msg_idx)
 
         elif t == "test_sweep":
             if self.test_task and not self.test_task.done():
@@ -818,10 +1132,14 @@ class BlinkyServer:
             mode = "FPP API" if isinstance(output, FPPOutput) else "E1.31"
             n = cfg.pixel_count
 
+            # Honour the configured Capture Delay; the sweep exists to preview
+            # exactly the pacing a real scan will use.
+            delay = max(cfg.inter_pixel_delay, 0.0)
+
             for idx in range(n):
-                def _one(i=idx, o=output):
+                def _one(i=idx, o=output, d=delay):
                     o.pixel_on(i)
-                    time.sleep(0.15)
+                    time.sleep(d)
 
                 await loop.run_in_executor(None, _one)
                 await ws.send(json.dumps({
@@ -881,6 +1199,103 @@ class BlinkyServer:
                 "type": "controller_status", "ok": False, "message": f"Error: {e}",
             }))
 
+    async def _run_coded_scan(self):
+        """Structured-light scan: log3(n)+2 frames instead of one per pixel.
+
+        Each frame lights every pixel, coloured by one digit of its base-3
+        index. The sensor captures a frame per digit, then intersects the
+        matching colour channels locally and returns every position at once.
+        """
+        sess = self.current_session
+        cfg = self.config
+        loop = asyncio.get_running_loop()
+        total = cfg.pixel_count
+        digits = coded_digit_count(total)
+        log.info("_run_coded_scan: START session=%d pixels=%d frames=%d",
+                 sess.session_id, total, digits)
+
+        output = await loop.run_in_executor(None, lambda: _make_output(cfg))
+        detected = 0
+
+        try:
+            # Hand the sensor the words so the encoding has exactly one
+            # implementation; the client never re-derives them.
+            words = {i: coded_word(i + 1, digits) for i in range(total)}
+            await self.broadcast({
+                "type": "coded_begin", "frames": digits,
+                "pixel_count": total, "words": words,
+            })
+
+            for f in range(digits):
+                pattern = coded_frame_pattern(total, f, digits)
+                await loop.run_in_executor(
+                    None, lambda p=pattern: output.set_pattern(p, total))
+                # Let the string latch and the camera settle before capturing.
+                await asyncio.sleep(max(cfg.inter_pixel_delay, 0.25))
+
+                self._frame_captured.clear()
+                await self.broadcast({"type": "coded_frame",
+                                      "index": f, "total": digits})
+                try:
+                    await asyncio.wait_for(self._frame_captured.wait(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    log.warning("Frame %d: no capture ack within 10s", f)
+                await self.broadcast({"type": "progress", "index": f, "total": digits})
+
+            await loop.run_in_executor(None, output.all_off)
+
+            # The sensor now does the intersection work and returns everything.
+            await self.broadcast({"type": "coded_analyze"})
+            try:
+                dets = await asyncio.wait_for(self._coded_results.get(), timeout=120.0)
+            except asyncio.TimeoutError:
+                log.error("No coded_detections within 120s")
+                dets = {}
+
+            for k, v in dets.items():
+                try:
+                    idx = int(k)
+                except (TypeError, ValueError):
+                    continue
+                if not (0 <= idx < total):
+                    continue
+                self.model.record_detection(sess.session_id, idx, Detection(
+                    cx=float(v["cx"]), cy=float(v["cy"]),
+                    conf=float(v.get("conf", 1.0))))
+                detected += 1
+
+            log.info("_run_coded_scan: DONE detected=%d/%d in %d frames",
+                     detected, total, digits)
+
+            _, det_dict = self.model.sessions[sess.session_id]
+            await self.broadcast({
+                "type": "scan_complete",
+                "session": sess.session_id,
+                "detected": detected, "total": total,
+                "detections": {i: {"cx": round(d.cx, 1), "cy": round(d.cy, 1),
+                                   "conf": round(d.conf, 3)}
+                               for i, d in det_dict.items()},
+                "angle": sess.angle_deg, "distance": sess.distance_m,
+                "height": sess.height_m,
+            })
+            self.model.triangulate()
+            await self.broadcast({"type": "model", "pixels": self.model.to_json_pixels()})
+            await self.broadcast({"type": "confidence", **self.model.model_confidence()})
+            await self.broadcast({"type": "next_suggestion",
+                                  **suggest_next_angle(self.model, self.model.sessions)})
+
+        except asyncio.CancelledError:
+            await loop.run_in_executor(None, output.all_off)
+            await self.broadcast({"type": "status", "message": "Scan stopped"})
+        except Exception as e:
+            log.error("_run_coded_scan failed: %s", e, exc_info=True)
+            await self.broadcast({"type": "status", "message": f"Scan error: {e}"})
+        finally:
+            try:
+                await loop.run_in_executor(None, output.close)
+            except Exception:
+                pass
+
     async def _run_scan(self):
         sess = self.current_session
         cfg  = self.config
@@ -900,9 +1315,16 @@ class BlinkyServer:
                 except asyncio.QueueEmpty:
                     break
 
-            # Request background capture
+            # Request background capture and wait for the sensor to confirm.
+            # The baseline is now several frames, so a fixed sleep would race it
+            # and the first pixels would be scanned with no baseline at all.
+            self._bg_ready.clear()
             await self.broadcast({"type": "capture_background"})
-            await asyncio.sleep(0.5)
+            try:
+                await asyncio.wait_for(self._bg_ready.wait(), timeout=8.0)
+                log.info("Baseline captured by sensor")
+            except asyncio.TimeoutError:
+                log.warning("No background_ready within 8s — scanning anyway")
 
             for idx in range(total):
                 await loop.run_in_executor(None, lambda i=idx: output.pixel_on(i))
