@@ -12,8 +12,9 @@
 
 import { openCamera, captureBackground, detectLED } from "./camera.js";
 import { Compass, angleDelta } from "./compass.js";
+import { CodedScan } from "./coded.js";
 
-export const BUILD = "v27";
+export const BUILD = "v28";
 const WS_URL = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/blinkymap-ws`;
 
 const $ = (id) => document.getElementById(id);
@@ -65,6 +66,8 @@ let hasCompass = false;
 let headingRef = null;      // as reported back by the server
 let liveAngle = null;
 let targetAngle = null;   // suggested next position, from the server
+let coded = null;         // active CodedScan
+let codedWords = null;    // pixel index -> base-3 code, supplied by the server
 
 // ── Setup panel ───────────────────────────────────────────────────────────────
 // Setup is per-session; the working screen is per-position. Collapse it as soon
@@ -122,6 +125,58 @@ function send(obj) {
 
 async function onMessage(msg) {
   switch (msg.type) {
+    case "coded_begin":
+      // Structured-light scan: a handful of frames, each lighting every pixel.
+      codedWords = msg.words || {};
+      coded = new CodedScan(camWidth, camHeight, msg.frames);
+      setCamStatus(`Coded scan: ${msg.frames} frames for ${msg.pixel_count} pixels`,
+                   "cam-status-bg");
+      break;
+
+    case "coded_frame": {
+      if (!coded || !camPreview.srcObject) {
+        send({ type: "coded_frame_captured", index: msg.index });
+        break;
+      }
+      // Let the sensor settle on the newly-lit frame before sampling it.
+      await sleep(140);
+      const ctx = camCanvas.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(camPreview, 0, 0, camCanvas.width, camCanvas.height);
+      coded.addFrame(ctx.getImageData(0, 0, camCanvas.width, camCanvas.height));
+      setCamStatus(`Captured frame ${msg.index + 1} / ${msg.total}`, "cam-status-on");
+      send({ type: "coded_frame_captured", index: msg.index });
+      break;
+    }
+
+    case "coded_analyze": {
+      if (!coded || !codedWords) {
+        send({ type: "coded_detections", detections: {} });
+        break;
+      }
+      setCamStatus("Resolving pixel positions…", "cam-status-bg");
+      const { found, misses } = coded.resolve(codedWords);
+      const out = {};
+      for (const k of Object.keys(found)) {
+        const p = found[k];
+        out[k] = { cx: p.cx, cy: p.cy, conf: p.conf };
+      }
+      const nFound = Object.keys(found).length;
+      const nMiss = Object.keys(misses).length;
+      // Log why each pixel was missed — with coded scanning a miss is a real
+      // statement about visibility, not a threshold artefact.
+      for (const k of Object.keys(misses)) {
+        console.log(`[BlinkyMap] pixel ${Number(k) + 1} not seen: ${misses[k]}`);
+      }
+      send({ type: "coded_detections", detections: out,
+             found: nFound, missed: nMiss });
+      drawFound(found);
+      setCamStatus(`${nFound} seen · ${nMiss} not visible from here`,
+                   nFound > 0 ? "cam-status-on" : "cam-status-off");
+      coded.dispose();
+      coded = null;
+      break;
+    }
+
     case "capture_background":
       if (camPreview.srcObject) {
         setCamStatus("Capturing baseline (hold still)…", "cam-status-bg");
@@ -349,7 +404,7 @@ btnScanHere.addEventListener("click", () => {
   send(payload);
 
   setTimeout(() => {
-    send({ type: "start_scan" });
+    send({ type: "start_coded_scan" });
     scanning = true;
     btnScanHere.disabled = true;
     lastResult.style.display = "none";
@@ -365,6 +420,23 @@ btnStopScan.addEventListener("click", () => {
   btnScanHere.disabled = false;
   progressBlock.style.display = "none";
 });
+
+// ── Show every resolved position after a coded scan ───────────────────────────
+function drawFound(found) {
+  if (!camOverlay || !camWidth) return;
+  if (camOverlay.width !== camWidth || camOverlay.height !== camHeight) {
+    camOverlay.width = camWidth; camOverlay.height = camHeight;
+  }
+  const ctx = camOverlay.getContext("2d");
+  ctx.clearRect(0, 0, camWidth, camHeight);
+  const r = Math.max(5, Math.round(Math.min(camWidth, camHeight) * 0.012));
+  ctx.lineWidth = Math.max(2, Math.round(r / 3));
+  for (const k of Object.keys(found)) {
+    const p = found[k];
+    ctx.strokeStyle = p.conf >= 0.5 ? "#69f0ae" : "#ffee58";
+    ctx.beginPath(); ctx.arc(p.cx, p.cy, r, 0, Math.PI * 2); ctx.stroke();
+  }
+}
 
 // ── Detection marker, drawn over the live preview ─────────────────────────────
 function drawDiff(result) {

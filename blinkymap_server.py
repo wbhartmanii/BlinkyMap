@@ -136,6 +136,21 @@ class E131Output:
             data[ch], data[ch+1], data[ch+2] = self._color
         self._send_raw(bytes(data))
 
+    def set_pattern(self, pattern_hex: str, pixel_count: int):
+        """Per-pixel colours in one frame — native to E1.31, no chase needed."""
+        data = bytearray(self._buf_len)
+        for i in range(pixel_count):
+            ch = self._offset + i * 3
+            if ch + 2 >= self._buf_len:
+                break
+            triplet = pattern_hex[i * 6:(i + 1) * 6]
+            if len(triplet) < 6:
+                break
+            data[ch]     = int(triplet[0:2], 16)
+            data[ch + 1] = int(triplet[2:4], 16)
+            data[ch + 2] = int(triplet[4:6], 16)
+        self._send_raw(bytes(data))
+
     def all_off(self):
         self._send_raw(bytes(self._buf_len))
 
@@ -171,6 +186,25 @@ class FPPOutput:
                      f"{ch_start}-{ch_end}", f"#{r:02x}{g:02x}{b:02x}"],
         }, timeout=3)
 
+    def set_pattern(self, pattern_hex: str, pixel_count: int):
+        """Drive every pixel to its own colour in one shot.
+
+        FPP's "Custom Chase" lays colorPattern out spatially across the string
+        (TestPatternRGBChase::SetupTest), so a pattern holding exactly one RGB
+        triplet per pixel gives each its own colour with no repetition. The
+        chase would rotate the pattern every cycleMS, so cycleMS is set far
+        beyond any capture window to hold it still.
+        """
+        ch_start = self._start
+        ch_end = self._start + pixel_count * 3 - 1
+        self._sess.post(self._url, json={
+            "command": "Test Start",
+            "multisyncCommand": True,
+            "multisyncHosts": "",
+            "args": ["600000", "Custom Chase", f"{ch_start}-{ch_end}",
+                     pattern_hex, "3"],
+        }, timeout=5)
+
     def all_off(self):
         self._sess.post(self._url, json={
             "command": "Test Stop",
@@ -205,6 +239,77 @@ def _make_output(cfg: "ControllerConfig"):
     log.info("Output: E1.31 → %s universe %d offset %d",
              cfg.host, *_abs_to_universe(cfg.start_channel))
     return E131Output(cfg.host, cfg.start_channel, cfg.pixel_count, cfg.pixel_color)
+
+
+# ── Coded (structured-light) scanning ─────────────────────────────────────────
+#
+# Rather than lighting one pixel per frame, light EVERY pixel in every frame and
+# colour each by one digit of its base-3 index: 0=red, 1=green, 2=blue. A pixel
+# is then located by intersecting the matching colour channel across frames —
+# only the true pixel satisfies every constraint.
+#
+# This is the scheme xLights uses in GenerateCustomModelDialog. It needs
+# log3(n)+2 frames instead of n, but the real gains are elsewhere: a reflection
+# must match the pixel's colour in EVERY frame to survive the intersection, an
+# occluded pixel leaves nothing surviving (so "not seen" is a geometric fact,
+# not a tuned threshold), and every frame lights the same number of LEDs so the
+# camera never re-exposes between frames.
+#
+# The trailing two digits are a checksum, so a misread is detectable.
+
+def coded_digit_count(pixel_count: int) -> int:
+    """Frames needed: base-3 digits of pixel_count, plus two check digits."""
+    count, p = 0, max(pixel_count, 1)
+    while p:
+        p //= 3
+        count += 1
+    return count + 2
+
+
+def coded_word(index: int, digits: int) -> str:
+    """Base-3 code for a 1-based pixel index, with xLights' two check digits.
+
+    check = 2 - (digitsum % 3), then (check + 1) % 3. Left-padded so every
+    pixel's word is the same length, which is what makes the frames align.
+    """
+    body, total, n = "", 0, index
+    while n > 0:
+        r = n % 3
+        body = str(r) + body
+        total += r
+        n //= 3
+    body = body or "0"
+    check = 2 - (total % 3)
+    word = body + str(check) + str((check + 1) % 3)
+    return word.rjust(digits, "0")
+
+
+def coded_word_valid(word: str) -> bool:
+    """Verify the two check digits — catches a misread rather than trusting it."""
+    if len(word) < 3:
+        return False
+    body, c1, c2 = word[:-2], int(word[-2]), int(word[-1])
+    total = sum(int(d) for d in body)
+    return c1 == 2 - (total % 3) and c2 == (c1 + 1) % 3
+
+
+# Digit -> colour. Full-intensity primaries keep the three channels separable.
+_CODE_COLOURS = {0: (255, 0, 0), 1: (0, 255, 0), 2: (0, 0, 255)}
+
+
+def coded_frame_pattern(pixel_count: int, digit: int, digits: int) -> str:
+    """Hex colour pattern for one frame: one RGB triplet per pixel, in order.
+
+    FPP's "Custom Chase" lays this out spatially across the string (see
+    TestPatternRGBChase::SetupTest), so a pattern holding exactly pixel_count
+    triplets gives every pixel its own colour with no repetition.
+    """
+    out = []
+    for i in range(pixel_count):
+        d = int(coded_word(i + 1, digits)[digit])
+        r, g, b = _CODE_COLOURS[d]
+        out.append(f"{r:02x}{g:02x}{b:02x}")
+    return "".join(out).upper()
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -723,6 +828,10 @@ class BlinkyServer:
         # Signalled by the sensor once its multi-frame baseline is captured.
         self._bg_ready: asyncio.Event = asyncio.Event()
 
+        # Coded-scan handshakes: one per captured frame, then the batch result.
+        self._frame_captured: asyncio.Event = asyncio.Event()
+        self._coded_results: asyncio.Queue = asyncio.Queue()
+
     async def broadcast(self, msg: dict, role: Optional[str] = None):
         targets = [c for c, r in self.clients.items() if role is None or r == role]
         if targets:
@@ -849,6 +958,24 @@ class BlinkyServer:
 
         elif t == "background_ready":
             self._bg_ready.set()
+
+        elif t == "coded_frame_captured":
+            self._frame_captured.set()
+
+        elif t == "coded_detections":
+            if self.clients.get(ws) == "control":
+                return
+            await self._coded_results.put(msg.get("detections") or {})
+
+        elif t == "start_coded_scan":
+            if self.scan_task and not self.scan_task.done():
+                await ws.send(json.dumps({"type": "status", "message": "Scan already running"}))
+                return
+            if not self.current_session:
+                await ws.send(json.dumps({"type": "status",
+                                          "message": "Set session position first"}))
+                return
+            self.scan_task = asyncio.create_task(self._run_coded_scan())
 
         elif t == "clear_reference":
             self.heading_reference = None
@@ -1046,6 +1173,103 @@ class BlinkyServer:
             await ws.send(json.dumps({
                 "type": "controller_status", "ok": False, "message": f"Error: {e}",
             }))
+
+    async def _run_coded_scan(self):
+        """Structured-light scan: log3(n)+2 frames instead of one per pixel.
+
+        Each frame lights every pixel, coloured by one digit of its base-3
+        index. The sensor captures a frame per digit, then intersects the
+        matching colour channels locally and returns every position at once.
+        """
+        sess = self.current_session
+        cfg = self.config
+        loop = asyncio.get_running_loop()
+        total = cfg.pixel_count
+        digits = coded_digit_count(total)
+        log.info("_run_coded_scan: START session=%d pixels=%d frames=%d",
+                 sess.session_id, total, digits)
+
+        output = await loop.run_in_executor(None, lambda: _make_output(cfg))
+        detected = 0
+
+        try:
+            # Hand the sensor the words so the encoding has exactly one
+            # implementation; the client never re-derives them.
+            words = {i: coded_word(i + 1, digits) for i in range(total)}
+            await self.broadcast({
+                "type": "coded_begin", "frames": digits,
+                "pixel_count": total, "words": words,
+            })
+
+            for f in range(digits):
+                pattern = coded_frame_pattern(total, f, digits)
+                await loop.run_in_executor(
+                    None, lambda p=pattern: output.set_pattern(p, total))
+                # Let the string latch and the camera settle before capturing.
+                await asyncio.sleep(max(cfg.inter_pixel_delay, 0.25))
+
+                self._frame_captured.clear()
+                await self.broadcast({"type": "coded_frame",
+                                      "index": f, "total": digits})
+                try:
+                    await asyncio.wait_for(self._frame_captured.wait(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    log.warning("Frame %d: no capture ack within 10s", f)
+                await self.broadcast({"type": "progress", "index": f, "total": digits})
+
+            await loop.run_in_executor(None, output.all_off)
+
+            # The sensor now does the intersection work and returns everything.
+            await self.broadcast({"type": "coded_analyze"})
+            try:
+                dets = await asyncio.wait_for(self._coded_results.get(), timeout=120.0)
+            except asyncio.TimeoutError:
+                log.error("No coded_detections within 120s")
+                dets = {}
+
+            for k, v in dets.items():
+                try:
+                    idx = int(k)
+                except (TypeError, ValueError):
+                    continue
+                if not (0 <= idx < total):
+                    continue
+                self.model.record_detection(sess.session_id, idx, Detection(
+                    cx=float(v["cx"]), cy=float(v["cy"]),
+                    conf=float(v.get("conf", 1.0))))
+                detected += 1
+
+            log.info("_run_coded_scan: DONE detected=%d/%d in %d frames",
+                     detected, total, digits)
+
+            _, det_dict = self.model.sessions[sess.session_id]
+            await self.broadcast({
+                "type": "scan_complete",
+                "session": sess.session_id,
+                "detected": detected, "total": total,
+                "detections": {i: {"cx": round(d.cx, 1), "cy": round(d.cy, 1),
+                                   "conf": round(d.conf, 3)}
+                               for i, d in det_dict.items()},
+                "angle": sess.angle_deg, "distance": sess.distance_m,
+                "height": sess.height_m,
+            })
+            self.model.triangulate()
+            await self.broadcast({"type": "model", "pixels": self.model.to_json_pixels()})
+            await self.broadcast({"type": "confidence", **self.model.model_confidence()})
+            await self.broadcast({"type": "next_suggestion",
+                                  **suggest_next_angle(self.model, self.model.sessions)})
+
+        except asyncio.CancelledError:
+            await loop.run_in_executor(None, output.all_off)
+            await self.broadcast({"type": "status", "message": "Scan stopped"})
+        except Exception as e:
+            log.error("_run_coded_scan failed: %s", e, exc_info=True)
+            await self.broadcast({"type": "status", "message": f"Scan error: {e}"})
+        finally:
+            try:
+                await loop.run_in_executor(None, output.close)
+            except Exception:
+                pass
 
     async def _run_scan(self):
         sess = self.current_session
