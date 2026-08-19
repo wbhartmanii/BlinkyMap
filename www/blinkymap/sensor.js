@@ -14,7 +14,7 @@ import { openCamera, captureBackground, detectLED } from "./camera.js";
 import { Compass, angleDelta } from "./compass.js";
 import { CodedScan } from "./coded.js";
 
-export const BUILD = "v29";
+export const BUILD = "v30";
 const WS_URL = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/blinkymap-ws`;
 
 const $ = (id) => document.getElementById(id);

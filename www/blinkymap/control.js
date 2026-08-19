@@ -27,6 +27,7 @@ const cfgStart       = document.getElementById("cfg-start");
 const cfgPixels      = document.getElementById("cfg-pixels");
 const cfgDelay       = document.getElementById("cfg-delay");
 const cfgFov         = document.getElementById("cfg-fov");
+const cfgTargetH     = document.getElementById("cfg-target-h");
 const cfgMinConf     = document.getElementById("cfg-min-conf");
 const cfgMinConfVal  = document.getElementById("cfg-min-conf-val");
 const btnSaveConfig      = document.getElementById("btn-save-config");
@@ -227,6 +228,7 @@ function sendConfig() {
     // Owned here, relayed by the server to the sensor that actually detects.
     min_conf:    parseInt(cfgMinConf.value) / 100,
     hfov_deg:    parseFloat(cfgFov.value),
+    target_height: toMeters(parseFloat(cfgTargetH.value) || 0),
   });
 }
 

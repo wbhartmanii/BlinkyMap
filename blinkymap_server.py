@@ -325,6 +325,11 @@ class ControllerConfig:
     # Detection settings: configured on the control UI, applied on the sensor.
     min_conf: float = 0.5
     hfov_deg: float = 60.0
+    # Height of the prop's centre above the floor. The camera is aimed here, so
+    # assuming it is half the camera height is only right by coincidence — a
+    # four-position scan measured 7px of reprojection error on that assumption
+    # alone. Negative means "use the old half-camera-height guess".
+    target_height_m: float = -1.0
 
 
 # ── Camera / session geometry ─────────────────────────────────────────────────
@@ -338,6 +343,9 @@ class SessionConfig:
     hfov_deg: float = 60.0
     img_width: int = 1280
     img_height: int = 720
+    # Where the camera is aimed, in world height. Negative -> fall back to the
+    # old assumption of half the camera height.
+    target_height_m: float = -1.0
 
 
 @dataclass
@@ -389,7 +397,9 @@ def _projection_matrix(sess: SessionConfig) -> np.ndarray:
         sess.height_m,
         sess.distance_m * math.cos(rad),
     ])
-    target = np.array([0.0, sess.height_m * 0.5, 0.0])
+    aim_y = (sess.target_height_m if sess.target_height_m >= 0.0
+             else sess.height_m * 0.5)
+    target = np.array([0.0, aim_y, 0.0])
     R = _look_at_R(eye, target)
     t = -R @ eye
     Rt = np.hstack([R, t.reshape(3, 1)])
@@ -867,6 +877,7 @@ class BlinkyServer:
             "type": "sensor_config",
             "min_conf": self.config.min_conf,
             "hfov_deg": self.config.hfov_deg,
+            "target_height": self.config.target_height_m,
         }
 
     def _sensor_summary(self) -> dict:
@@ -1000,6 +1011,8 @@ class BlinkyServer:
             self.config.output_mode       = msg.get("output_mode", self.config.output_mode)
             self.config.min_conf          = float(msg.get("min_conf", self.config.min_conf))
             self.config.hfov_deg          = float(msg.get("hfov_deg", self.config.hfov_deg))
+            self.config.target_height_m   = float(msg.get("target_height",
+                                                          self.config.target_height_m))
             self.model.pixel_count        = self.config.pixel_count
             await self.broadcast(self._sensor_config(), role="sensor")
             await ws.send(json.dumps({"type": "status", "message": "Config saved"}))
@@ -1021,6 +1034,7 @@ class BlinkyServer:
                 hfov_deg=float(msg.get("hfov_deg", self.config.hfov_deg)),
                 img_width=int(msg.get("img_width", 1280)),
                 img_height=int(msg.get("img_height", 720)),
+                target_height_m=self.config.target_height_m,
             )
             self.model.add_session(self.current_session)
             await ws.send(json.dumps({"type": "status",
