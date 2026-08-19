@@ -562,3 +562,11 @@ body.sensor-body #last-result { margin: 0.4rem 0 0; font-size: 0.78rem; }
 #setup-strip .slider-hint { margin: 0.3rem 0 0; font-size: 0.72rem; }
 #setup-strip label { margin-bottom: 0; }
 #build-tag { font-size: 0.62rem; color: #6a6a90; letter-spacing: 0.03em; }
+
+/* Next-step banner: the single most important thing after a scan completes. */
+body.sensor-body #last-result.next-step {
+  background: #241a4d; border: 1px solid #7c4dff;
+  color: #e8e8ff; font-size: 0.85rem; line-height: 1.35;
+}
+body.sensor-body #last-result.next-step strong { color: #b39dff; }
+.hud-chip { font-weight: 600; border: 1px solid #ffffff22; }

@@ -14,7 +14,7 @@ import { openCamera, captureBackground, detectLED } from "./camera.js";
 import { Compass, angleDelta } from "./compass.js";
 import { CodedScan } from "./coded.js";
 
-export const BUILD = "v28";
+export const BUILD = "v29";
 const WS_URL = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/blinkymap-ws`;
 
 const $ = (id) => document.getElementById(id);
@@ -66,6 +66,8 @@ let hasCompass = false;
 let headingRef = null;      // as reported back by the server
 let liveAngle = null;
 let targetAngle = null;   // suggested next position, from the server
+let suggestReason = "";
+let lastScan = null;
 let coded = null;         // active CodedScan
 let codedWords = null;    // pixel index -> base-3 code, supplied by the server
 
@@ -233,10 +235,8 @@ async function onMessage(msg) {
       scanning = false;
       progressBlock.style.display = "none";
       btnScanHere.disabled = false;
-      lastResult.style.display = "block";
-      lastResult.className = "cam-status " + (msg.detected > 0 ? "cam-status-on" : "cam-status-off");
-      lastResult.textContent =
-        `Session ${msg.session} at ${Math.round(msg.angle)}°: ${msg.detected}/${msg.total} pixels seen`;
+      lastScan = msg;
+      showNextStep();
       break;
 
     case "sensor_config":
@@ -247,13 +247,16 @@ async function onMessage(msg) {
 
     case "next_suggestion":
       targetAngle = msg.angle ?? null;
+      suggestReason = msg.reason || "";
       renderCompass();
+      showNextStep();
       break;
 
     case "sensor_status":
       headingRef = msg.reference;
       liveAngle  = msg.angle;
       renderCompass();
+      showNextStep();
       maybeCollapseSetup();
       break;
 
@@ -420,6 +423,33 @@ btnStopScan.addEventListener("click", () => {
   btnScanHere.disabled = false;
   progressBlock.style.display = "none";
 });
+
+// ── Tell the operator what to do next ─────────────────────────────────────────
+// A scan is useless on its own: triangulation needs the same pixel from two
+// positions. The suggested angle was previously only a small chip over the
+// preview, which is easy to miss right after a scan completes.
+function showNextStep() {
+  if (!lastScan) return;
+  lastResult.style.display = "block";
+  const got = `Session ${lastScan.session} at ${Math.round(lastScan.angle)}°: ` +
+              `${lastScan.detected}/${lastScan.total} seen`;
+  if (targetAngle === null) {
+    lastResult.className = "cam-status " + (lastScan.detected > 0 ? "cam-status-on" : "cam-status-off");
+    lastResult.textContent = got;
+    return;
+  }
+  const here = (liveAngle !== null && liveAngle !== undefined) ? liveAngle : null;
+  let move = "";
+  if (here !== null) {
+    const d = angleDelta(targetAngle, here);
+    move = Math.abs(d) <= 5
+      ? " — you are there, scan again"
+      : ` — walk ${Math.abs(Math.round(d))}° ${d > 0 ? "clockwise" : "counter-clockwise"}`;
+  }
+  lastResult.className = "cam-status next-step";
+  lastResult.innerHTML =
+    `${got}<br><strong>Next: move to ${Math.round(targetAngle)}°</strong>${move}`;
+}
 
 // ── Show every resolved position after a coded scan ───────────────────────────
 function drawFound(found) {
