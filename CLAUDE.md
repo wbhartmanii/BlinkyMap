@@ -6,32 +6,125 @@ BlinkyMap is an FPP (Falcon Player) plugin that automatically builds a 3D xLight
 ## Architecture
 
 ### Components
-- **`blinkymap_server.py`** — Python asyncio WebSocket server (port 8765). Handles FPP API calls, scan orchestration, pixel detection sync, and 3D model triangulation.
-- **`www/blinkymap/app.js`** — Single-page app JavaScript (ES modules, Three.js 3D viewer, WebSocket client).
-- **`www/blinkymap/index.html`** — SPA shell with 4 tabs: Setup, Scan, 3D Model, Export.
-- **`www/blinkymap/style.css`** — Dark mobile-first theme.
-- **`www/index.php`** — FPP entry point. Starts Python server if needed, forces HTTPS, redirects to SPA.
-- **`scripts/fpp_install.sh`** — FPP Plugin Manager installer. Installs Python deps (numpy, websockets, requests), downloads Three.js 0.160.0, configures Apache alias + WebSocket proxy, generates self-signed SSL cert.
-- **`menu.inc`** — FPP navigation menu entry (uses `plugin.php?plugin=` router).
-- **`plugin.php`** — FPP plugin.php compatibility shim.
-- **`pluginInfo.json`** — FPP plugin metadata; `branch: "main"` for production.
+- **`blinkymap_server.py`** — Python asyncio WebSocket server (port 8765). FPP
+  output, scan orchestration, triangulation, export. Also owns the base-3
+  coding used by structured-light scans.
+- **`www/blinkymap/index.html`** — role chooser. Remembers the pick in
+  localStorage; `?pick=1` forces it back.
+- **`www/blinkymap/control.{html,js}`** — laptop UI: controller setup, session
+  list, 3D model, export. No camera code at all.
+- **`www/blinkymap/sensor.{html,js}`** — phone UI: camera, compass, and it
+  starts scans (the operator is standing at the position). Single fixed screen,
+  never scrolls.
+- **`www/blinkymap/coded.js`** — structured-light detection: classifies each
+  frame by dominant colour and resolves every pixel in one pass.
+- **`www/blinkymap/camera.js`** — getUserMedia, multi-frame baseline, and the
+  legacy one-pixel-at-a-time detector.
+- **`www/blinkymap/compass.js`** — device heading, normalised across iOS/Android.
+- **`www/blinkymap/viewer3d.js`** — Three.js viewer; auto-fits to the model.
+- **`www/index.php`** — FPP entry point. Starts the Python server, forces HTTPS,
+  redirects to the role chooser.
+- **`scripts/fpp_install.sh`** — installer: deps, Three.js, Apache alias,
+  WebSocket proxy, self-signed cert, and `no-store` on the plugin's HTML.
+- **`menu.inc`**, **`plugin.php`**, **`pluginInfo.json`** — FPP plugin wiring.
+
+### How scanning works (structured light)
+This is the important one. Rather than lighting one pixel per frame, **every
+frame lights every pixel**, each coloured by one digit of its base-3 index
+(0 red, 1 green, 2 blue). A pixel is located by finding the image region
+carrying its colour in *every* frame. `log3(n)+2` frames instead of `n` — 5 for
+24 pixels, 8 for 500. Adopted from xLights' `GenerateCustomModelDialog`; see
+`docs/xlights-detection-notes.md`.
+
+Speed is the least of it:
+- A reflection must match the pixel's colour in **every** frame to survive
+  (1 in 243 at five frames). The old one-pixel detector had no such defence and
+  reflections regularly won, producing confident wrong positions.
+- An occluded pixel leaves no region carrying its code, so **"not visible" is a
+  geometric fact**, not a tuned threshold. Before this, every scan reported
+  24/24 on a pile where pixels were plainly buried.
+- Every frame lights the same number of LEDs, so scene brightness is constant
+  and the camera never re-exposes between frames.
+
+**Driving per-pixel colours** needs no E1.31 bridge. FPP's `"Custom Chase"`
+takes an arbitrary hex `colorPattern`, and `TestPatternRGBChase::SetupTest`
+lays it out *spatially across the string*, so a pattern holding exactly one RGB
+triplet per pixel gives each its own colour. `cycleMS` is set to 600000 so the
+chase cannot rotate mid-capture. Verified on real hardware.
+
+Resolution is **one pass per frame regardless of pixel count**. Building a mask
+per pixel and intersecting would be pixels x frames x imageArea (~110M ops for
+24 pixels at 720x1280); instead each image pixel's per-frame colour classes fold
+into a single base-3 code with centroids accumulated by code.
 
 ### Key Design Decisions
-- **asyncio.Queue for detection sync** (not asyncio.Event — had a clear-race bug). The scan loop calls `asyncio.wait_for(queue.get(), timeout=0.5)`. `no_detection` is NOT queued; the 0.5s timeout serves as the "not detected" signal. This prevents two-browser-tab races where a stale tab's fast `no_detection` beat the active tab's camera-processing `detection`.
-- **JS closure capture** in `pixel_on` handler uses `msg.index` (not `currentPixelIdx` shared state) to prevent race between async detection and `pixel_off` handler.
-- **WebSocket proxy** through Apache at `/blinkymap-ws → ws://127.0.0.1:8765` satisfies FPP's same-origin CSP.
-- **HTTPS required** for `getUserMedia` (camera) in all modern browsers. The install script generates a self-signed cert; users accept the browser warning once.
-- **Asset cache busting** via `?v=N` query strings on CSS/JS/HTML. Increment `v=` when deploying to FPP (FPP caches aggressively).
-- **Split control/camera across devices works unmodified** (verified 2026-08-17).
-  `pixel_on` / `capture_background` are broadcast to every client, and a
-  `detection` is accepted from any of them, so a laptop can drive the UI while
-  a phone supplies the camera. A camera-less client replies `no_detection`,
-  which the server drops rather than queues — the same choice that fixed the
-  two-tab race is what makes this safe. Tested with a client sending instant
-  `no_detection` alongside one sending delayed `detection`: 6/6 counted from
-  the camera client. Caveats: only ONE client may have a camera open (two would
-  race, first-write-wins), and the phone must not sleep — mobile browsers
-  suspend JS on screen lock, which looks identical to "pixel not visible".
+- **Roles are negotiated, not guessed.** Clients send
+  `{type:"hello", role:"control"|"sensor"}`; the server **only accepts
+  detections from a sensor**. A stray webcam on the laptop cannot race the
+  phone's observations — this used to be a caveat users had to remember.
+- **Compass angles are relative.** The operator sets a 0° reference at their
+  first position; later angles are `(heading - reference) mod 360`. Aiming at
+  the prop rotates heading degree-for-degree with position, so this needs no
+  true-north calibration and cancels constant magnetic bias. iOS exposes
+  `webkitCompassHeading` (behind `requestPermission()`, needs a user gesture);
+  its `alpha` is RELATIVE and must never be used. Android needs
+  `deviceorientationabsolute`, whose alpha runs counter-clockwise.
+- **Camera handedness.** `_look_at_R` must use `cross(up, z)` for right and
+  `cross(x, z)` for down. The reverse order points "right" to the LEFT and
+  silently **mirrors every reconstruction** — an xLights import then comes out
+  as a mirror image of the prop. This bug cost 118.6px vs 69.0px of
+  reprojection error on real data and was invisible to every other diagnostic.
+- **Aim height is stated, not assumed.** `_projection_matrix` used to aim at
+  half the camera height. That is a guess about where the operator points; on a
+  real scan it cost 7px, and being wrong by 30cm cost far more. Set "Prop centre
+  height" on the Control tab. Sessions store their own value; negative means
+  fall back to the old assumption so existing data is not reinterpreted.
+- **The plugin's HTML must not be cached.** FPP serves static assets with
+  `max-age=31536000, immutable`. That is fine for query-versioned JS and CSS,
+  but a cached HTML page keeps requesting an old `?v=` forever — hours were lost
+  re-testing code that had already been replaced. The installer sets `no-store`
+  on `*.html`. The sensor header also shows a build tag (`v30`); if it does not
+  match what was deployed, nothing else matters.
+- **Asset cache busting** via `?v=N` on CSS/JS. Increment on every deploy.
+- **WebSocket proxy** through Apache at `/blinkymap-ws → ws://127.0.0.1:8765`
+  satisfies FPP's same-origin CSP.
+- **HTTPS required** for `getUserMedia` and `DeviceOrientationEvent`.
+- **Confidence measures discriminability, not brightness.** The old score was
+  `peak/255`, which pegged near 1.0 for anything bright, so the minimum-confidence
+  gate never rejected anything. Coded scanning supersedes this, but the legacy
+  detector's score is now sparsity x compactness x uniqueness (geometric mean).
+
+## Scanning technique — what actually moves the number
+Measured on real four-position scans of the same prop:
+- **Angular spread dominates.** Two positions 15° apart contribute almost no
+  baseline. One near-duplicate viewpoint took reprojection from 44.3px to
+  62.1px. Follow the suggested angle; keep positions ≥60° apart.
+- **Angle accuracy beats more scans.** Improving ±25° to ±10° is a 2.6x gain;
+  going from 2 to 4 positions at fixed accuracy is only 1.5x. Use the compass.
+- **Distance and height barely matter** if kept consistent — a common error
+  becomes a global scale or translation, which normalises away. Do not buy a
+  tripod; handheld drift of even 30° across a scan costs under 7px.
+- **A pile of lights is a pathological test case.** Mutual illumination and
+  occlusion dominate everything else. Spread the prop out before drawing
+  conclusions about accuracy.
+- **Pixel pitch is NOT a known distance.** Pitch is measured along the wire; the
+  straight-line 3D distance between consecutive LEDs is only ever ≤ pitch, and
+  varies by model. Never use it as ground truth or to calibrate FOV.
+
+## Reprojection error — history on the same prop
+Useful for judging whether a change actually helped. Consensus metric (median
+error of each pixel's consensus point across all views), not the server's
+per-pair figure, which is roughly half.
+
+| state | px |
+|---|---|
+| one-pixel detector, mirrored camera | 119 |
+| coded scan, still mirrored | 119 |
+| coded scan, handedness fixed | 69 |
+| ... dropping one near-duplicate viewpoint | 44 |
+
+The middle row is the informative one: **better observations did not move
+reprojection at all**, which is what finally isolated the mirrored axis.
 
 ## Deployment Environment
 
@@ -73,26 +166,55 @@ Verified against FPP 9.5.3 on 2026-08-17.
   pixel 1 = ch 4–6, pixel 23 = ch 70–72.
 
 ## Development Branch
-Current working branch: `claude/fpp-plugin-testing-b9pzvc`, then merges to `main`.
+Work happens on a `claude/*` branch, then merges to `main`. `pluginInfo.json`
+pins `branch: "main"`, so anything the FPP Plugin Manager installs comes from
+`main` — merge before expecting a fresh install to pick a change up.
 
-## Known Issues / GitHub Issues
-See https://github.com/wbhartmanii/BlinkyMap/issues for the current list.
-Filed issues cover:
-- Unit label line breaks (Distance from center `\nft\n`)
-- Confidence tip not updating after 2nd scan
-- Per-pixel found/not-found status during scan
-- Pixel-by-pixel live view during scan
-- 3D model tab contextual tips
-- 2D-only mapping mode option
-- m/ft toggle placement (currently in header, feels disconnected)
-- Extrapolate positions for unseen pixels from neighbors
-- 3D model updates incrementally, doesn't wait for 100% detection
+BlinkyMap is **not** in FPP's official `pluginList.json`, so it does not appear
+in the Plugin Manager UI. Install by cloning into `/home/fpp/media/plugins/blinkymap`
+and running `scripts/fpp_install.sh`.
+
+## Known Issues / Open Questions
+See https://github.com/wbhartmanii/BlinkyMap/issues for filed issues. Several
+older ones are now obsolete — per-pixel found/not-found status and the live
+scan view were both overtaken by coded scanning.
+
+Open, in rough priority order:
+- **Reprojection still sits around 45-60px** on a good four-position scan. The
+  camera model is the remaining suspect: lens distortion is unmodelled, and the
+  best-fit FOV (~40-70°, weakly constrained) does not clearly match the
+  configured value. A one-time per-device calibration would settle it — no
+  browser API exposes the true FOV, and pitch cannot be used to derive it.
+- **Camera tilt is unmodelled.** Measured worth ~3x the same error in compass
+  yaw, and pitch from the accelerometer is far more accurate (±1-2°) than
+  magnetometer yaw (±10°). Deliberately not built yet: naively bolting a
+  measured rotation onto a typed position made things *worse* in simulation,
+  because the look-at model is self-consistent under position error and that
+  compensation is lost. Would need the position solved for too.
+- **Legacy one-pixel scan path** still exists server-side (`start_scan`) but
+  nothing drives it. Remove once coded scanning is proven on a real prop.
+- Extrapolate positions for unseen pixels from neighbours.
+- 2D-only mapping mode option.
 
 ## Testing Checklist
-1. Open FPP UI → navigate to BlinkyMap (or go direct to `https://<fpp-ip>/plugin/blinkymap/`)
-2. Setup tab: enter FPP IP, pixel count (50), start channel (9004), save & connect
-3. Open camera, check green camera status bar
-4. Scan tab: set angle/distance/height, start session — verify pixels counted > 0
-5. After scan: check expandable session card shows per-pixel detail
-6. Check confidence score and tip updates after each scan
-7. Export tab: download .xmodel and import into xLights Layout
+1. Browse to `https://<fpp-ip>/plugin/blinkymap/` on **both** laptop and phone;
+   accept the self-signed cert on each and pick a role.
+2. **Confirm the build tag** in the sensor header matches what was deployed. If
+   it does not, stop — you are testing stale code.
+3. Control tab: FPP IP, start channel, pixel count, **prop centre height**,
+   detection settings → Save & Connect. Watch for "Sensor connected".
+4. Phone: ⚙ → Open Camera → Enable Compass → Set 0° here. Setup collapses once
+   all three are done.
+5. Tap **Scan From Here**. A 24-pixel scan takes ~3s (5 frames). Expect the
+   string to flash multi-coloured patterns, then circles on every pixel found.
+6. **Some pixels reporting "not visible" is correct**, not a regression — that
+   is honest occlusion reporting.
+7. Follow the suggested next angle. Keep positions ≥60° apart; a second scan is
+   required before any 3D model can exist.
+8. Control tab: 3D model should appear after the second scan, and the confidence
+   tip should name the actual limiting factor.
+9. Export tab: download .xmodel and import into xLights Layout.
+
+Quick server-side checks:
+- `grep _run_coded_scan /tmp/blinkymap_server.log` — frames and counts per scan.
+- `curl -s http://<fpp-ip>/api/testmode` — confirms what FPP is driving.
