@@ -5,13 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>BlinkyMap Sensor</title>
-  <link rel="stylesheet" href="style.css?v=30" />
+  <link rel="stylesheet" href="style.css?v=31" />
 </head>
 <body class="sensor-body">
 
 <!--
   Single-screen layout. Everything needed to take a scan is visible at once:
-  aim in the preview, read the angle in the header, confirm distance, tap Scan.
+  centre the prop under the crosshair, read the angle in the header, confirm
+  distance, tap Scan. The crosshair defines the aim point the tilt is measured
+  against, so framing it the same way at every position is what keeps the
+  positions consistent.
   Setup controls collapse once done — they are used once per session, not once
   per position.
 -->
@@ -33,6 +36,19 @@
   <div id="cam-wrap">
     <video id="cam-preview" autoplay playsinline muted></video>
     <canvas id="cam-overlay"></canvas>
+    <!-- Aim point. Whatever sits under this crosshair defines the aim height,
+         so the reticle is not decoration: it is the measurement's definition. -->
+    <div id="aim-point" class="aim-idle">
+      <svg viewBox="0 0 120 120" aria-hidden="true">
+        <circle cx="60" cy="60" r="26" />
+        <line x1="60" y1="4"  x2="60" y2="34" />
+        <line x1="60" y1="86" x2="60" y2="116" />
+        <line x1="4"  y1="60" x2="34" y2="60" />
+        <line x1="86" y1="60" x2="116" y2="60" />
+        <circle cx="60" cy="60" r="2.5" class="aim-dot" />
+      </svg>
+      <span id="aim-label">tilt &mdash;</span>
+    </div>
     <div id="cam-placeholder">Tap &#9881; to open the camera</div>
   </div>
   <div id="compass-guide" class="hud-chip" style="display:none"></div>
@@ -44,7 +60,7 @@
 <div id="setup-strip">
   <div class="setup-row">
     <button class="btn-secondary" id="btn-open-camera">Open Camera</button>
-    <button class="btn-secondary" id="btn-enable-compass">Enable Compass</button>
+    <button class="btn-secondary" id="btn-enable-compass">Enable Sensors</button>
   </div>
   <div class="setup-row">
     <button class="btn-primary" id="btn-set-reference">Set 0&deg; here</button>
@@ -69,7 +85,11 @@
     <label class="inline-field">Dist&nbsp;<span class="unit-sfx">m</span>
       <input id="sess-dist" type="number" value="2.0" min="0.5" max="20" step="0.5" />
     </label>
-    <label class="inline-field">High&nbsp;<span class="unit-sfx">m</span>
+    <div id="tilt-readout" class="inline-field tilt-readout" style="display:none">
+      <span class="tilt-label">Aim</span>
+      <span id="tilt-value">&mdash;</span>
+    </div>
+    <label class="inline-field" id="manual-height-field">High&nbsp;<span class="unit-sfx">m</span>
       <input id="sess-height" type="number" value="1.5" min="0.2" max="10" step="0.1" />
     </label>
   </div>
@@ -94,6 +114,6 @@
 <span id="compass-angle" style="display:none"></span>
 <span id="compass-sub" style="display:none"></span>
 
-<script type="module" src="sensor.js?v=30"></script>
+<script type="module" src="sensor.js?v=31"></script>
 </body>
 </html>

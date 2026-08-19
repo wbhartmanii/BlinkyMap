@@ -570,3 +570,54 @@ body.sensor-body #last-result.next-step {
 }
 body.sensor-body #last-result.next-step strong { color: #b39dff; }
 .hud-chip { font-weight: 600; border: 1px solid #ffffff22; }
+
+/* ── Aim point ────────────────────────────────────────────────────────────────
+   The video uses object-fit:contain inside #cam-wrap, so the image is centred
+   in the box and the box centre IS the image centre. Centring the reticle in
+   CSS therefore puts it on the optical axis with no arithmetic — and the
+   optical axis is exactly what the tilt measures. Anything that offsets one
+   without the other silently redefines the aim point. */
+#aim-point {
+  position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  display: flex; flex-direction: column; align-items: center; gap: 0.3rem;
+}
+#aim-point svg {
+  width: 74px; height: 74px; display: block;
+  overflow: visible;
+  filter: drop-shadow(0 0 2px rgba(0,0,0,0.85));
+}
+#aim-point svg circle, #aim-point svg line {
+  fill: none; stroke: currentColor; stroke-width: 3; stroke-linecap: round;
+}
+#aim-point svg .aim-dot { fill: currentColor; stroke: none; }
+#aim-label {
+  font-size: 0.72rem; font-weight: 600; letter-spacing: 0.02em;
+  padding: 0.15rem 0.4rem; border-radius: 5px;
+  background: rgba(10,10,24,0.78); color: inherit;
+  text-shadow: 0 0 2px rgba(0,0,0,0.9);
+}
+/* Idle = no tilt signal yet; live = measuring; warn = too steep or unsteady. */
+#aim-point.aim-idle { color: #8a8ab0; }
+#aim-point.aim-live { color: #69f0ae; }
+#aim-point.aim-warn { color: #ffee58; }
+/* The reticle would sit on top of the detection circles after a scan. */
+#aim-point.aim-hidden { display: none; }
+
+.tilt-readout {
+  justify-content: flex-start; gap: 0.4rem;
+  background: #16162a; border: 1px solid #2a2a45; border-radius: 6px;
+  padding: 8px 10px;
+}
+.tilt-readout .tilt-label { color: #9a9ac0; }
+#tilt-value { font-size: 0.95rem; font-weight: 600; color: #e8e8ff; }
+#tilt-value.tilt-warn { color: var(--yellow); }
+
+/* Drift: the capture spans seconds and every frame is attributed to one pose,
+   so a wandering hand smears the geometry rather than averaging out. */
+body.sensor-body #last-result.drift-warn {
+  background: #33240f; border: 1px solid var(--yellow);
+  color: #ffe9a8; font-size: 0.82rem; line-height: 1.35;
+}
+body.sensor-body #last-result.drift-warn strong { color: var(--yellow); }

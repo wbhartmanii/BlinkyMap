@@ -27,7 +27,6 @@ const cfgStart       = document.getElementById("cfg-start");
 const cfgPixels      = document.getElementById("cfg-pixels");
 const cfgDelay       = document.getElementById("cfg-delay");
 const cfgFov         = document.getElementById("cfg-fov");
-const cfgTargetH     = document.getElementById("cfg-target-h");
 const cfgMinConf     = document.getElementById("cfg-min-conf");
 const cfgMinConfVal  = document.getElementById("cfg-min-conf-val");
 const btnSaveConfig      = document.getElementById("btn-save-config");
@@ -151,7 +150,8 @@ async function handleServerMessage(msg) {
       scanning = false;
       scanBlock.style.display = "none";
       addSessionCard(msg.session, msg.detected, msg.total, msg.detections || {},
-                     msg.angle ?? 0, msg.distance ?? 2, msg.height ?? 1.5);
+                     msg.angle ?? 0, msg.distance ?? 2, msg.height ?? 1.5,
+                     msg.pitch ?? null, msg.pitch_spread ?? 0);
       statusMsg(`Session ${msg.session}: ${msg.detected}/${msg.total} detected`);
       break;
 
@@ -163,7 +163,8 @@ async function handleServerMessage(msg) {
       sessionList.innerHTML = "";
       for (const s of msg.sessions || []) {
         addSessionCard(s.session, s.detected, s.total, s.detections || {},
-                       s.angle ?? 0, s.distance ?? 2, s.height ?? 1.5);
+                       s.angle ?? 0, s.distance ?? 2, s.height ?? 1.5,
+                       s.pitch ?? null, s.pitch_spread ?? 0);
       }
       break;
 
@@ -228,7 +229,6 @@ function sendConfig() {
     // Owned here, relayed by the server to the sensor that actually detects.
     min_conf:    parseInt(cfgMinConf.value) / 100,
     hfov_deg:    parseFloat(cfgFov.value),
-    target_height: toMeters(parseFloat(cfgTargetH.value) || 0),
   });
 }
 
@@ -315,12 +315,20 @@ function updateProgress(done, total) {
   progressLabel.textContent = `${done} / ${total}`;
 }
 
-function sessionPosStr(angle, distM, heightM) {
-  return `${Math.round(angle)}° · ${formatDist(distM)} away · ${formatDist(heightM)} high`;
+function sessionPosStr(angle, distM, heightM, pitch) {
+  // heightM is the camera's height above its AIM POINT, not above the floor —
+  // the floor never enters the geometry.
+  const rise = `${heightM >= 0 ? "+" : "−"}${formatDist(Math.abs(heightM))} above aim`;
+  const how = (pitch === null || pitch === undefined)
+    ? "typed"
+    : `${pitch.toFixed(1)}° tilt`;
+  return `${Math.round(angle)}° · ${formatDist(distM)} away · ${rise} · ${how}`;
 }
 
-function addSessionCard(sessionId, detected, total, detections, angleDeg, distM, heightM) {
-  sessions.push({ id: sessionId, detected, total, detections, angleDeg, distM, heightM });
+function addSessionCard(sessionId, detected, total, detections, angleDeg, distM, heightM,
+                        pitch = null, pitchSpread = 0) {
+  sessions.push({ id: sessionId, detected, total, detections, angleDeg, distM, heightM,
+                  pitch, pitchSpread });
   const pct = total > 0 ? Math.round((detected / total) * 100) : 0;
   const badge = pct >= 70 ? "badge-good" : pct >= 40 ? "badge-medium" : "badge-poor";
 
@@ -354,7 +362,7 @@ function addSessionCard(sessionId, detected, total, detections, angleDeg, distM,
     <div class="session-card-header">
       <div class="sess-title">
         <div class="sess-name">Session ${sessionId}</div>
-        <div class="sess-pos">${sessionPosStr(angleDeg, distM, heightM)}</div>
+        <div class="sess-pos">${sessionPosStr(angleDeg, distM, heightM, pitch)}</div>
       </div>
       <span class="badge ${badge}">${detected}/${total} (${pct}%)</span>
       <span class="sess-chevron">▸</span>
@@ -381,7 +389,10 @@ function addSessionCard(sessionId, detected, total, detections, angleDeg, distM,
 function showSuggestion(msg) {
   const angle = msg.angle ?? 0;
   suggAngle.textContent  = `${angle}°`;
-  suggDist.textContent   = `${formatDist(msg.distance ?? 2)} from center · same height`;
+  // "Same framing" rather than "same height": the tilt is measured per position,
+  // so standing higher or lower is now free — framing the prop the same way is
+  // what keeps the aim point consistent between positions.
+  suggDist.textContent   = `${formatDist(msg.distance ?? 2)} from center · same framing`;
   suggReason.textContent = msg.reason ?? "";
   suggCard.style.display = "block";
 }
@@ -428,8 +439,9 @@ function updateConfidence(msg) {
       case "accuracy":
         tip = `Coverage and angle spread are already maxed, so more scans will not ` +
               `raise this score. Reprojection error is ${msg.reproj_px}px — the limit ` +
-              `is detection precision and how accurately the distance and height were ` +
-              `entered. Spread the pixels out, or re-measure your position.`;
+              `is detection precision and how accurately the distance was entered ` +
+              `(the camera height is measured, not typed). Spread the pixels out, ` +
+              `or re-measure your distance.`;
         break;
       default:
         tip = `${msg.high} high-confidence · ${msg.medium} medium · ${msg.low} low · ` +

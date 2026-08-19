@@ -13,8 +13,16 @@
 import { openCamera, captureBackground, detectLED } from "./camera.js";
 import { Compass, angleDelta } from "./compass.js";
 import { CodedScan } from "./coded.js";
+import { Tilt, heightAboveAim, MAX_PITCH_DEG } from "./tilt.js";
 
-export const BUILD = "v30";
+export const BUILD = "v31";
+
+// Peak-to-peak movement across a capture, beyond which the pose recorded for
+// the session no longer describes all of its frames. Pitch comes from the
+// accelerometer and is good to ~1-2 deg, so 3 deg is real movement rather than
+// noise; heading is magnetometer-grade (~10 deg) and needs a looser bound.
+const PITCH_DRIFT_WARN_DEG   = 3.0;
+const HEADING_DRIFT_WARN_DEG = 8.0;
 const WS_URL = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/blinkymap-ws`;
 
 const $ = (id) => document.getElementById(id);
@@ -38,6 +46,11 @@ const compassFallbackMsg = $("compass-fallback-msg");
 const sessAngle   = $("sess-angle");
 const sessDist    = $("sess-dist");
 const sessHeight  = $("sess-height");
+const manualHeightField = $("manual-height-field");
+const tiltReadout = $("tilt-readout");
+const aimPoint    = $("aim-point");
+const aimLabel    = $("aim-label");
+const tiltValue   = $("tilt-value");
 const btnScanHere = $("btn-scan-here");
 const scanHint    = $("scan-hint");
 
@@ -63,6 +76,9 @@ let scanning = false;
 let minConf = 0.5;          // relayed from the control UI via sensor_config
 let hfovDeg = 60;           // ditto
 let hasCompass = false;
+let hasTilt = false;
+let headingSamples = null;  // non-null while a capture is being sampled
+let lastDrift = null;
 let headingRef = null;      // as reported back by the server
 let liveAngle = null;
 let targetAngle = null;   // suggested next position, from the server
@@ -101,6 +117,7 @@ unitToggle.addEventListener("click", (e) => {
     const v = parseFloat(el.value);
     if (!isNaN(v)) el.value = (v * factor).toFixed(2);
   }
+  renderTilt();
 });
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -152,6 +169,8 @@ async function onMessage(msg) {
 
     case "coded_analyze": {
       if (!coded || !codedWords) {
+        endCaptureSampling();
+        lastDrift = null;
         send({ type: "coded_detections", detections: {} });
         break;
       }
@@ -169,8 +188,13 @@ async function onMessage(msg) {
       for (const k of Object.keys(misses)) {
         console.log(`[BlinkyMap] pixel ${Number(k) + 1} not seen: ${misses[k]}`);
       }
+      const drift = endCaptureSampling();
       send({ type: "coded_detections", detections: out,
-             found: nFound, missed: nMiss });
+             found: nFound, missed: nMiss,
+             // Mean over the capture beats the instantaneous value taken when
+             // the session was created, and this lands before triangulation.
+             pitch_deg: drift.pitch ? drift.pitch.mean : null,
+             pitch_spread_deg: drift.pitch ? drift.pitch.spread : 0 });
       drawFound(found);
       setCamStatus(`${nFound} seen · ${nMiss} not visible from here`,
                    nFound > 0 ? "cam-status-on" : "cam-status-off");
@@ -257,6 +281,7 @@ async function onMessage(msg) {
       liveAngle  = msg.angle;
       renderCompass();
       showNextStep();
+      restoreAimIfMoved();
       maybeCollapseSetup();
       break;
 
@@ -287,11 +312,101 @@ btnOpenCamera.addEventListener("click", async () => {
   }
 });
 
+// ── Tilt ──────────────────────────────────────────────────────────────────────
+// The camera's depression below horizontal, which with the typed distance gives
+// the camera's height above its own aim point — the only height the geometry
+// uses. See tilt.js for why this replaces two typed numbers rather than adding
+// a third.
+const tilt = new Tilt();
+
+function formatLen(m) {
+  return units === "ft" ? `${(m * 3.28084).toFixed(1)}ft` : `${m.toFixed(2)}m`;
+}
+
+function renderTilt() {
+  // Exactly one of these is live at a time, and the visible one is always the
+  // one actually feeding the geometry.
+  tiltReadout.style.display       = hasTilt ? "" : "none";
+  manualHeightField.style.display = hasTilt ? "none" : "";
+
+  if (!hasTilt || tilt.pitch === null) {
+    aimPoint.className = "aim-idle";
+    aimLabel.textContent = hasTilt ? "tilt —" : "no tilt";
+    tiltValue.textContent = hasTilt ? "—" : "manual";
+    tiltValue.className   = hasTilt ? "" : "tilt-warn";
+    return;
+  }
+  const p = tilt.pitch;
+  const steep = Tilt.tooSteep(p);
+  const dist  = toMeters(parseFloat(sessDist.value) || 2.0);
+  const rise  = heightAboveAim(dist, p);
+
+  aimPoint.className = steep ? "aim-warn" : "aim-live";
+  aimLabel.textContent = `${p >= 0 ? "▼" : "▲"} ${Math.abs(p).toFixed(1)}°`;
+
+  // Show the derived quantity, not just the raw angle: "camera is 0.30m above
+  // what the crosshair is on" is the thing the operator can sanity-check.
+  tiltValue.textContent = steep
+    ? `${p.toFixed(1)}° too steep`
+    : `${p.toFixed(1)}° · ${rise >= 0 ? "+" : "−"}${formatLen(Math.abs(rise))}`;
+  tiltValue.className = steep ? "tilt-warn" : "";
+}
+
+// Keep the derived height honest when the distance changes.
+sessDist.addEventListener("input", () => renderTilt());
+
+// ── Drift across a capture ────────────────────────────────────────────────────
+// A coded scan spans several seconds and every frame is attributed to ONE pose.
+// A hand that wanders does not average out — it smears the geometry — so the
+// swing is measured and reported rather than silently absorbed.
+function beginCaptureSampling() {
+  lastDrift = null;
+  if (hasTilt) tilt.beginSample();
+  headingSamples = hasCompass && compass.heading !== null ? [compass.heading] : null;
+}
+
+function endCaptureSampling() {
+  const pitch = hasTilt ? tilt.endSample() : null;
+  let heading = null;
+  if (headingSamples && headingSamples.length) {
+    // Circular: measure every sample against the first, so a scan straddling
+    // 360° does not report a 359° swing.
+    const base = headingSamples[0];
+    const deltas = headingSamples.map(h => angleDelta(h, base));
+    heading = { spread: Math.max(...deltas) - Math.min(...deltas),
+                n: headingSamples.length };
+  }
+  headingSamples = null;
+  lastDrift = { pitch, heading };
+  return lastDrift;
+}
+
+/** Human-readable drift complaint, or "" when the capture was steady. */
+function driftWarning() {
+  if (!lastDrift) return "";
+  const bad = [];
+  if (lastDrift.pitch && lastDrift.pitch.spread > PITCH_DRIFT_WARN_DEG) {
+    bad.push(`tilt moved ${lastDrift.pitch.spread.toFixed(1)}°`);
+  }
+  if (lastDrift.heading && lastDrift.heading.spread > HEADING_DRIFT_WARN_DEG) {
+    bad.push(`heading moved ${lastDrift.heading.spread.toFixed(0)}°`);
+  }
+  return bad.join(" · ");
+}
+
 // ── Compass ───────────────────────────────────────────────────────────────────
 const compass = new Compass();
 let lastPoseSent = 0;
 
 btnEnableCompass.addEventListener("click", async () => {
+  // Start the tilt sensor first and never gate it on the compass: it needs only
+  // the accelerometer, so it still works on a device whose magnetometer is
+  // absent or is being thrown by nearby metal.
+  const tiltRes = await tilt.start();
+  hasTilt = tiltRes === "ok";
+  if (hasTilt) tilt.onPitch = () => renderTilt();
+  renderTilt();
+
   const res = await compass.start();
   if (res === "ok") {
     hasCompass = true;
@@ -305,6 +420,7 @@ btnEnableCompass.addEventListener("click", async () => {
         lastPoseSent = now;
         send({ type: "pose", heading: deg, accuracy: acc });
       }
+      if (headingSamples) headingSamples.push(deg);
       renderCompass(deg, acc);
     };
   } else {
@@ -388,16 +504,30 @@ btnScanHere.addEventListener("click", () => {
     scanHint.textContent = "Set a 0° reference before scanning.";
     return;
   }
+  if (hasTilt && tilt.pitch !== null && Tilt.tooSteep(tilt.pitch)) {
+    scanHint.textContent =
+      `Aimed ${Math.abs(tilt.pitch).toFixed(0)}° from horizontal — past ` +
+      `${MAX_PITCH_DEG}° the height is dominated by your distance estimate. ` +
+      `Step back, or raise the crosshair onto the prop.`;
+    return;
+  }
   scanHint.textContent = "";
 
   const payload = {
     type: "set_session",
     distance: toMeters(parseFloat(sessDist.value) || (units === "ft" ? 6.56 : 2.0)),
-    height:   toMeters(parseFloat(sessHeight.value) || (units === "ft" ? 4.92 : 1.5)),
     hfov_deg: hfovDeg,
     img_width: camWidth,
     img_height: camHeight,
   };
+  if (hasTilt && tilt.pitch !== null) {
+    // Instantaneous value; the mean over the capture follows with the
+    // detections and supersedes it before anything is triangulated.
+    payload.pitch_deg = tilt.pitch;
+  } else {
+    payload.height = toMeters(parseFloat(sessHeight.value) ||
+                              (units === "ft" ? 4.92 : 1.5));
+  }
   if (hasCompass) {
     payload.angle_source = "compass";   // server substitutes the measured angle
     payload.angle = liveAngle ?? 0;
@@ -410,6 +540,8 @@ btnScanHere.addEventListener("click", () => {
     send({ type: "start_coded_scan" });
     scanning = true;
     btnScanHere.disabled = true;
+    beginCaptureSampling();
+    aimPoint.classList.remove("aim-hidden");
     lastResult.style.display = "none";
     progressBlock.style.display = "block";
     progressBar.style.width = "0%";
@@ -419,6 +551,8 @@ btnScanHere.addEventListener("click", () => {
 
 btnStopScan.addEventListener("click", () => {
   send({ type: "stop_scan" });
+  endCaptureSampling();
+  lastDrift = null;
   scanning = false;
   btnScanHere.disabled = false;
   progressBlock.style.display = "none";
@@ -433,9 +567,22 @@ function showNextStep() {
   lastResult.style.display = "block";
   const got = `Session ${lastScan.session} at ${Math.round(lastScan.angle)}°: ` +
               `${lastScan.detected}/${lastScan.total} seen`;
+
+  // Every frame of a capture is attributed to ONE pose. If the phone wandered,
+  // that pose no longer describes all of them and the session is smeared.
+  // Re-scanning while still standing here costs three seconds; discovering it
+  // from the reprojection error costs the model.
+  const drift = driftWarning();
+  const driftLine = drift
+    ? `<strong>Held unsteady — ${drift}</strong><br>Brace against something and ` +
+      `scan again from here before moving on.<br>`
+    : "";
+
   if (targetAngle === null) {
-    lastResult.className = "cam-status " + (lastScan.detected > 0 ? "cam-status-on" : "cam-status-off");
-    lastResult.textContent = got;
+    lastResult.className = drift
+      ? "cam-status drift-warn"
+      : "cam-status " + (lastScan.detected > 0 ? "cam-status-on" : "cam-status-off");
+    lastResult.innerHTML = driftLine + got;
     return;
   }
   const here = (liveAngle !== null && liveAngle !== undefined) ? liveAngle : null;
@@ -446,9 +593,26 @@ function showNextStep() {
       ? " — you are there, scan again"
       : ` — walk ${Math.abs(Math.round(d))}° ${d > 0 ? "clockwise" : "counter-clockwise"}`;
   }
-  lastResult.className = "cam-status next-step";
+  lastResult.className = drift ? "cam-status drift-warn" : "cam-status next-step";
   lastResult.innerHTML =
-    `${got}<br><strong>Next: move to ${Math.round(targetAngle)}°</strong>${move}`;
+    driftLine + `${got}<br><strong>Next: move to ${Math.round(targetAngle)}°</strong>${move}`;
+}
+
+/**
+ * Bring the aim point back once the operator has walked away from the scanned
+ * position. The result circles belong to where they were standing; the crosshair
+ * is what they need to frame the next position, and hiding it until the next tap
+ * on Scan would take it away exactly when it is being used.
+ */
+function restoreAimIfMoved() {
+  if (!lastScan || scanning) return;
+  if (liveAngle === null || liveAngle === undefined) return;
+  if (Math.abs(angleDelta(liveAngle, lastScan.angle)) <= 5) return;
+  if (!aimPoint.classList.contains("aim-hidden")) return;
+  aimPoint.classList.remove("aim-hidden");
+  if (camOverlay && camWidth) {
+    camOverlay.getContext("2d").clearRect(0, 0, camWidth, camHeight);
+  }
 }
 
 // ── Show every resolved position after a coded scan ───────────────────────────
@@ -457,6 +621,7 @@ function drawFound(found) {
   if (camOverlay.width !== camWidth || camOverlay.height !== camHeight) {
     camOverlay.width = camWidth; camOverlay.height = camHeight;
   }
+  if (hasCompass) aimPoint.classList.add("aim-hidden");
   const ctx = camOverlay.getContext("2d");
   ctx.clearRect(0, 0, camWidth, camHeight);
   const r = Math.max(5, Math.round(Math.min(camWidth, camHeight) * 0.012));
@@ -500,6 +665,7 @@ function drawDiff(result) {
 
 // First run: setup is the only thing to do, so lead with it.
 compassFallback.style.display = "none";
+renderTilt();
 setSetupOpen(true);
 hudLabel.title = BUILD;
 document.getElementById("build-tag").textContent = BUILD;

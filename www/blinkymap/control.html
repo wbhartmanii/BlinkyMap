@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>BlinkyMap Control</title>
-  <link rel="stylesheet" href="style.css?v=30" />
+  <link rel="stylesheet" href="style.css?v=31" />
 
   <!-- Import map for Three.js (served locally after install.sh) -->
   <script type="importmap">
@@ -77,11 +77,12 @@
     <span class="slider-hint">Lower &rarr; more pixels detected (more false positives) &middot; Higher &rarr; fewer but more accurate</span>
   </label>
 
-  <label>Prop centre height above floor (<span class="unit-sfx">m</span>)
-    <input id="cfg-target-h" type="number" value="0" min="0" max="10" step="0.1" />
-    <span class="slider-hint">Where you aim the camera. Leave 0 for something sitting on the
-      floor. The old code assumed half your camera height, which is right only by luck.</span>
-  </label>
+  <p class="slider-hint">
+    Camera height and aim height are no longer entered here. The sensor measures
+    the camera's tilt and derives them from the distance you enter there — the
+    geometry only ever used the difference between the two, which is exactly
+    what the tilt gives.
+  </p>
 
   <h2>Sensor</h2>
   <div id="sensor-status" class="cam-status cam-status-off">No sensor connected</div>
@@ -163,7 +164,7 @@
   </ol>
 </section>
 
-<script type="module" src="control.js?v=30"></script>
+<script type="module" src="control.js?v=31"></script>
 <p class="slider-hint" style="padding:0 1rem 1rem"><a href="./">&larr; change role</a></p>
 </body>
 </html>

@@ -21,6 +21,8 @@ BlinkyMap is an FPP (Falcon Player) plugin that automatically builds a 3D xLight
 - **`www/blinkymap/camera.js`** — getUserMedia, multi-frame baseline, and the
   legacy one-pixel-at-a-time detector.
 - **`www/blinkymap/compass.js`** — device heading, normalised across iOS/Android.
+- **`www/blinkymap/tilt.js`** — camera depression below horizontal, from the
+  accelerometer. Replaces both typed heights; see below.
 - **`www/blinkymap/viewer3d.js`** — Three.js viewer; auto-fits to the model.
 - **`www/index.php`** — FPP entry point. Starts the Python server, forces HTTPS,
   redirects to the role chooser.
@@ -74,11 +76,32 @@ into a single base-3 code with centroids accumulated by code.
   silently **mirrors every reconstruction** — an xLights import then comes out
   as a mirror image of the prop. This bug cost 118.6px vs 69.0px of
   reprojection error on real data and was invisible to every other diagnostic.
-- **Aim height is stated, not assumed.** `_projection_matrix` used to aim at
-  half the camera height. That is a guess about where the operator points; on a
-  real scan it cost 7px, and being wrong by 30cm cost far more. Set "Prop centre
-  height" on the Control tab. Sessions store their own value; negative means
-  fall back to the old assumption so existing data is not reinterpreted.
+- **Aim height is measured, not typed.** `_projection_matrix` depends on the
+  camera height `h` and the aim height `t` **only through `h - t`** — adding a
+  constant to both leaves the rotation identical and merely translates the eye,
+  and `_normalize` subtracts the per-axis minimum before export, so a common
+  offset costs nothing. So the geometry never needed two numbers, it needed one:
+
+      h - t = distance * tan(depression)
+
+  which the phone measures. `tilt.js` derives the depression from `beta`/`gamma`
+  as `asin(cos B * cos G)` — exact against the full W3C rotation matrix,
+  independent of `alpha` (so it does not care about the magnetometer), and
+  orientation-agnostic, which naive use of `beta` alone is not. The operator
+  centres the prop under the crosshair, so **the aim point defines itself**: no
+  one needs to know how high the prop's middle is. Both "camera height" and
+  "prop centre height" fields are gone. A typed height survives only as the
+  fallback for a device with no accelerometer (`pitch_deg = None`).
+- **The crosshair is the measurement's definition, not decoration.** The video
+  is `object-fit: contain` inside `#cam-wrap`, so the box centre is the image
+  centre and a CSS-centred reticle sits on the optical axis with no arithmetic.
+  Offsetting one without the other silently redefines the aim point.
+- **Drift across a capture is reported, not absorbed.** A coded scan spans
+  seconds and every frame is attributed to ONE pose, so a wandering hand smears
+  the geometry rather than averaging out. The sensor records peak-to-peak pitch
+  and heading across the capture window — which closes at `coded_analyze`, not
+  at `scan_complete`, because the operator lowers the phone while analysis
+  runs — and warns above 3° of tilt or 8° of heading.
 - **The plugin's HTML must not be cached.** FPP serves static assets with
   `max-age=31536000, immutable`. That is fine for query-versioned JS and CSS,
   but a cached HTML page keeps requesting an old `?v=` forever — hours were lost
@@ -101,9 +124,13 @@ Measured on real four-position scans of the same prop:
   62.1px. Follow the suggested angle; keep positions ≥60° apart.
 - **Angle accuracy beats more scans.** Improving ±25° to ±10° is a 2.6x gain;
   going from 2 to 4 positions at fixed accuracy is only 1.5x. Use the compass.
-- **Distance and height barely matter** if kept consistent — a common error
-  becomes a global scale or translation, which normalises away. Do not buy a
-  tripod; handheld drift of even 30° across a scan costs under 7px.
+- **Distance barely matters** if kept consistent — a common error becomes a
+  global scale, which normalises away. Height matters even less now: it is
+  derived from the measured tilt, so standing higher or lower at one position
+  is free. What replaces it is **framing consistency** — the crosshair defines
+  the aim point, so framing the prop differently at one position is the error
+  that survives. Do not buy a tripod, but do brace your hands: the sensor now
+  tells you when a capture was too unsteady to trust.
 - **A pile of lights is a pathological test case.** Mutual illumination and
   occlusion dominate everything else. Spread the prop out before drawing
   conclusions about accuracy.
@@ -122,6 +149,7 @@ per-pair figure, which is roughly half.
 | coded scan, still mirrored | 119 |
 | coded scan, handedness fixed | 69 |
 | ... dropping one near-duplicate viewpoint | 44 |
+| measured tilt replacing both typed heights | not yet measured on real data |
 
 The middle row is the informative one: **better observations did not move
 reprojection at all**, which is what finally isolated the mirrored axis.
@@ -185,26 +213,40 @@ Open, in rough priority order:
   best-fit FOV (~40-70°, weakly constrained) does not clearly match the
   configured value. A one-time per-device calibration would settle it — no
   browser API exposes the true FOV, and pitch cannot be used to derive it.
-- **Camera tilt is unmodelled.** Measured worth ~3x the same error in compass
-  yaw, and pitch from the accelerometer is far more accurate (±1-2°) than
-  magnetometer yaw (±10°). Deliberately not built yet: naively bolting a
-  measured rotation onto a typed position made things *worse* in simulation,
-  because the look-at model is self-consistent under position error and that
-  compensation is lost. Would need the position solved for too.
+- ~~**Camera tilt is unmodelled.**~~ Done, but note *how*. The earlier attempt
+  that made things worse bolted a measured rotation ON TOP of a look-at built
+  from a typed position — double-counting the tilt and destroying the
+  self-consistency look-at has under position error. The shipped version uses
+  the same measurement to infer the POSITION instead, leaving look-at untouched:
+  the camera still aims exactly at the target and nothing is applied twice.
+  `tests/test_tilt_geometry.py` proves the reconstruction is identical to
+  ground truth up to a Y translation that export normalises away. **Not yet
+  validated on real hardware** — the simulation says exact, a real scan has not
+  been taken.
 - **Legacy one-pixel scan path** still exists server-side (`start_scan`) but
   nothing drives it. Remove once coded scanning is proven on a real prop.
 - Extrapolate positions for unseen pixels from neighbours.
 - 2D-only mapping mode option.
+
+## Tests
+No CI. Run both before trusting a geometry change:
+- `python3 -m pytest tests/test_tilt_geometry.py` — the tilt scheme against the
+  shipped `_projection_matrix`, with synthetic ground truth.
+- `node tests/test_tilt.mjs` — `tilt.js` against the full W3C rotation matrix.
 
 ## Testing Checklist
 1. Browse to `https://<fpp-ip>/plugin/blinkymap/` on **both** laptop and phone;
    accept the self-signed cert on each and pick a role.
 2. **Confirm the build tag** in the sensor header matches what was deployed. If
    it does not, stop — you are testing stale code.
-3. Control tab: FPP IP, start channel, pixel count, **prop centre height**,
-   detection settings → Save & Connect. Watch for "Sensor connected".
-4. Phone: ⚙ → Open Camera → Enable Compass → Set 0° here. Setup collapses once
-   all three are done.
+3. Control tab: FPP IP, start channel, pixel count, detection settings → Save &
+   Connect. Watch for "Sensor connected". There is no height field any more.
+4. Phone: ⚙ → Open Camera → **Enable Sensors** → Set 0° here. Setup collapses
+   once all three are done. Confirm the "Aim" readout shows a tilt angle and a
+   derived height — if it says "manual", the accelerometer was refused and a
+   typed height is being used instead.
+4b. **Centre the prop under the crosshair** and frame it the same way at every
+   position. The crosshair defines the aim point the tilt is measured against.
 5. Tap **Scan From Here**. A 24-pixel scan takes ~3s (5 frames). Expect the
    string to flash multi-coloured patterns, then circles on every pixel found.
 6. **Some pixels reporting "not visible" is correct**, not a regression — that

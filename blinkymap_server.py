@@ -25,7 +25,8 @@ WebSocket message protocol (JSON):
   Browser → Server
     {"type": "set_config",       "host": str, "universe": int, "start_ch": int,
                                   "pixel_count": int, "delay": float}
-    {"type": "set_session",      "angle": float, "distance": float, "height": float}
+    {"type": "set_session",      "angle": float, "distance": float,
+                                 "pitch_deg": float, "pitch_spread_deg": float}
     {"type": "set_fov",          "hfov_deg": float, "width": int, "height": int}
     {"type": "start_scan"}
     {"type": "detection",        "index": int, "cx": float, "cy": float, "conf": float}
@@ -325,11 +326,6 @@ class ControllerConfig:
     # Detection settings: configured on the control UI, applied on the sensor.
     min_conf: float = 0.5
     hfov_deg: float = 60.0
-    # Height of the prop's centre above the floor. The camera is aimed here, so
-    # assuming it is half the camera height is only right by coincidence — a
-    # four-position scan measured 7px of reprojection error on that assumption
-    # alone. Negative means "use the old half-camera-height guess".
-    target_height_m: float = -1.0
 
 
 # ── Camera / session geometry ─────────────────────────────────────────────────
@@ -339,13 +335,18 @@ class SessionConfig:
     session_id: int
     angle_deg: float   # horizontal angle around tree (0 = front)
     distance_m: float  # metres from trunk centre
-    height_m: float    # camera height above ground
+    height_m: float    # camera height above ground (fallback only, see below)
     hfov_deg: float = 60.0
     img_width: int = 1280
     img_height: int = 720
-    # Where the camera is aimed, in world height. Negative -> fall back to the
-    # old assumption of half the camera height.
-    target_height_m: float = -1.0
+    # Depression of the optical axis below horizontal, in degrees, measured on
+    # the phone at capture time. This is the real input: with it, height_m is
+    # not consulted at all. None means the device had no usable accelerometer
+    # and the operator typed a height instead.
+    pitch_deg: Optional[float] = None
+    # Peak-to-peak pitch swing across the capture. Recorded for diagnosis; the
+    # sensor is what warns the operator.
+    pitch_spread_deg: float = 0.0
 
 
 @dataclass
@@ -389,16 +390,55 @@ def _look_at_R(eye: np.ndarray, target: np.ndarray) -> np.ndarray:
     return np.vstack([x, y, z])
 
 
+# Past this the tan() blows up and any error in the typed distance amplifies
+# with it. Mirrors MAX_PITCH_DEG in tilt.js.
+MAX_PITCH_DEG = 60.0
+
+
+def _camera_geometry(sess: SessionConfig) -> Tuple[float, float]:
+    """Camera height and aim height, in world units. Returns (eye_y, aim_y).
+
+    Only the DIFFERENCE between these two matters. `_look_at_R` derives the
+    rotation from `target - eye`, so adding a constant to both leaves the
+    rotation untouched and merely translates the eye. Applied at every position
+    that is a rigid translation of the whole reconstruction, and `_normalize`
+    subtracts the per-axis minimum before export — so it costs nothing.
+
+    That is what lets the measured tilt replace two typed numbers. The operator
+    centres the prop in the viewfinder, so the optical axis passes through it by
+    construction, and
+
+        eye_y - aim_y = distance * tan(depression)
+
+    is the entire content of the old "camera height" and "prop centre height"
+    fields. Neither the prop's true centre height nor the operator's true eye
+    height is needed, or even knowable to better than a guess. Setting aim_y to
+    zero puts the origin at the aim point instead of the floor; the export
+    normalises that away.
+    """
+    if sess.pitch_deg is None:
+        # No usable accelerometer: fall back to the typed height, aiming at the
+        # old half-height assumption. Worse, and known to be worse.
+        return sess.height_m, sess.height_m * 0.5
+    pitch = max(-MAX_PITCH_DEG, min(MAX_PITCH_DEG, sess.pitch_deg))
+    return sess.distance_m * math.tan(math.radians(pitch)), 0.0
+
+
+def _height_above_aim(sess: SessionConfig) -> float:
+    """The one height the geometry uses. Reported to the UIs as such."""
+    eye_y, aim_y = _camera_geometry(sess)
+    return eye_y - aim_y
+
+
 def _projection_matrix(sess: SessionConfig) -> np.ndarray:
     K = _make_K(sess.img_width, sess.img_height, sess.hfov_deg)
     rad = math.radians(sess.angle_deg)
+    eye_y, aim_y = _camera_geometry(sess)
     eye = np.array([
         sess.distance_m * math.sin(rad),
-        sess.height_m,
+        eye_y,
         sess.distance_m * math.cos(rad),
     ])
-    aim_y = (sess.target_height_m if sess.target_height_m >= 0.0
-             else sess.height_m * 0.5)
     target = np.array([0.0, aim_y, 0.0])
     R = _look_at_R(eye, target)
     t = -R @ eye
@@ -877,7 +917,6 @@ class BlinkyServer:
             "type": "sensor_config",
             "min_conf": self.config.min_conf,
             "hfov_deg": self.config.hfov_deg,
-            "target_height": self.config.target_height_m,
         }
 
     def _sensor_summary(self) -> dict:
@@ -913,7 +952,11 @@ class BlinkyServer:
                             "total":    self.model.pixel_count or self.config.pixel_count,
                             "angle":    sc.angle_deg,
                             "distance": sc.distance_m,
-                            "height":   sc.height_m,
+                            # Height above the AIM POINT, which is the only
+                            # height the geometry uses.
+                            "height":   _height_above_aim(sc),
+                            "pitch":    sc.pitch_deg,
+                            "pitch_spread": sc.pitch_spread_deg,
                             "detections": {
                                 i: {"cx": round(d.cx, 1), "cy": round(d.cy, 1),
                                     "conf": round(d.conf, 3)}
@@ -987,6 +1030,13 @@ class BlinkyServer:
         elif t == "coded_detections":
             if self.clients.get(ws) == "control":
                 return
+            # The pitch that arrives here is the mean over the capture window,
+            # which is strictly better than the instantaneous value sampled when
+            # the session was created — and it lands before triangulation.
+            if self.current_session is not None and msg.get("pitch_deg") is not None:
+                self.current_session.pitch_deg = float(msg["pitch_deg"])
+                self.current_session.pitch_spread_deg = float(
+                    msg.get("pitch_spread_deg", 0.0))
             await self._coded_results.put(msg.get("detections") or {})
 
         elif t == "start_coded_scan":
@@ -1011,8 +1061,6 @@ class BlinkyServer:
             self.config.output_mode       = msg.get("output_mode", self.config.output_mode)
             self.config.min_conf          = float(msg.get("min_conf", self.config.min_conf))
             self.config.hfov_deg          = float(msg.get("hfov_deg", self.config.hfov_deg))
-            self.config.target_height_m   = float(msg.get("target_height",
-                                                          self.config.target_height_m))
             self.model.pixel_count        = self.config.pixel_count
             await self.broadcast(self._sensor_config(), role="sensor")
             await ws.send(json.dumps({"type": "status", "message": "Config saved"}))
@@ -1026,6 +1074,9 @@ class BlinkyServer:
                 measured = self._sensor_angle()
                 if measured is not None:
                     angle = measured
+            # The tilt is the real geometric input; a typed height is only the
+            # fallback for a device that reports no orientation at all.
+            pitch = msg.get("pitch_deg")
             self.current_session = SessionConfig(
                 session_id=sid,
                 angle_deg=float(angle),
@@ -1034,9 +1085,17 @@ class BlinkyServer:
                 hfov_deg=float(msg.get("hfov_deg", self.config.hfov_deg)),
                 img_width=int(msg.get("img_width", 1280)),
                 img_height=int(msg.get("img_height", 720)),
-                target_height_m=self.config.target_height_m,
+                pitch_deg=None if pitch is None else float(pitch),
+                pitch_spread_deg=float(msg.get("pitch_spread_deg", 0.0)),
             )
             self.model.add_session(self.current_session)
+            eye_y, aim_y = _camera_geometry(self.current_session)
+            log.info("Session %d: angle=%.1f dist=%.2fm pitch=%s -> camera %.2fm "
+                     "above aim point (spread %.1f deg)",
+                     sid, self.current_session.angle_deg,
+                     self.current_session.distance_m,
+                     "none" if pitch is None else f"{float(pitch):.1f}deg",
+                     eye_y - aim_y, self.current_session.pitch_spread_deg)
             await ws.send(json.dumps({"type": "status",
                                        "message": f"Session {sid} ready"}))
 
@@ -1276,7 +1335,9 @@ class BlinkyServer:
                                    "conf": round(d.conf, 3)}
                                for i, d in det_dict.items()},
                 "angle": sess.angle_deg, "distance": sess.distance_m,
-                "height": sess.height_m,
+                "height": _height_above_aim(sess),
+                "pitch": sess.pitch_deg,
+                "pitch_spread": sess.pitch_spread_deg,
             })
             self.model.triangulate()
             await self.broadcast({"type": "model", "pixels": self.model.to_json_pixels()})
@@ -1377,7 +1438,9 @@ class BlinkyServer:
                 "detections": detections_out,
                 "angle": sess.angle_deg,
                 "distance": sess.distance_m,
-                "height": sess.height_m,
+                "height": _height_above_aim(sess),
+                "pitch": sess.pitch_deg,
+                "pitch_spread": sess.pitch_spread_deg,
             })
 
             # Triangulate and broadcast model
