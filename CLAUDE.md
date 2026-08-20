@@ -270,9 +270,9 @@ in the Plugin Manager UI. Install by cloning into `/home/fpp/media/plugins/blink
 and running `scripts/fpp_install.sh`.
 
 ## Known Issues / Open Questions
-See https://github.com/wbhartmanii/BlinkyMap/issues for filed issues. Several
-older ones are now obsolete — per-pixel found/not-found status and the live
-scan view were both overtaken by coded scanning.
+See https://github.com/wbhartmanii/BlinkyMap/issues. The obsolete ones have now
+been closed with their reasons (#9 and #10 were overtaken by coded scanning),
+so what is open is what is actually open.
 
 Open, in rough priority order:
 - **Reprojection still sits around 45-60px** on a good four-position scan. The
