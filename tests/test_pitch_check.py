@@ -1,4 +1,4 @@
-"""Wire-length sanity check: pitch as an upper bound on neighbour distance.
+"""Wire-length sanity check: pixel pitch as an upper bound on neighbour distance.
 
 Run: python3 tests/test_pitch_check.py
 
@@ -16,7 +16,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import blinkymap_server as B  # noqa: E402
 
-PITCH = 0.1  # 100mm
+PIXEL_PITCH = 0.1  # 100mm
 FAILS = []
 
 
@@ -27,10 +27,10 @@ def check(label, got, want):
         FAILS.append(f"{label}: got {got!r}, want {want!r}")
 
 
-def model(positions, pitch=PITCH, breaks=()):
+def model(positions, pixel_pitch=PIXEL_PITCH, breaks=()):
     m = B.BlinkyModel()
     m.pixel_count = len(positions)
-    m.pitch_m = pitch
+    m.pixel_pitch_m = pixel_pitch
     m.string_breaks = breaks
     m.sessions = {s: (B.SessionConfig(s, s * 90, 2, 1.5), {}) for s in (1, 2)}
     for i, p in enumerate(positions):
@@ -54,14 +54,14 @@ check("none", B._parse_breaks(None, 24), ())
 print("\nchord stats")
 check("pitch unset disables it", B._neighbour_chords(model(line(24, .1)).results, 24, 0.0), None)
 check("taut string reads exactly pitch",
-      B._neighbour_chords(model(line(24, .1)).results, 24, PITCH)["median_mm"], 100.0)
+      B._neighbour_chords(model(line(24, .1)).results, 24, PIXEL_PITCH)["median_mm"], 100.0)
 check("taut string flags nothing impossible",
-      B._neighbour_chords(model(line(24, .1)).results, 24, PITCH)["over_pitch"], 0.0)
+      B._neighbour_chords(model(line(24, .1)).results, 24, PIXEL_PITCH)["over_pitch"], 0.0)
 check("all pixels at one point -> no bound",
-      B._neighbour_chords(model([(0, 0, 0)] * 24).results, 24, PITCH)["max_scale"], None)
+      B._neighbour_chords(model([(0, 0, 0)] * 24).results, 24, PIXEL_PITCH)["max_scale"], None)
 check("unseen pixels are skipped, not spanned",
       B._neighbour_chords(model(line(24, .1)[:5] + [None] + line(24, .1)[6:]).results,
-                          24, PITCH)["pairs"], 21)
+                          24, PIXEL_PITCH)["pairs"], 21)
 
 print("\nlimiting factor")
 check("taut", model(line(24, .1)).model_confidence()["limiting"], "none")
@@ -98,20 +98,20 @@ for _ in range(N):
     pts.append(np.array([R * np.sin(ang), y, R * np.cos(ang)]))
     lat = 2 * R * np.sin(DTH / 2)
     ang += DTH
-    y += np.sqrt(PITCH ** 2 - lat ** 2)
+    y += np.sqrt(PIXEL_PITCH ** 2 - lat ** 2)
 pts = np.array(pts)
-assert abs(np.linalg.norm(pts[1] - pts[0]) - PITCH) < 1e-9, "fixture must be taut"
+assert abs(np.linalg.norm(pts[1] - pts[0]) - PIXEL_PITCH) < 1e-9, "fixture must be taut"
 
 
 def reconstruct(true_fov, assumed_fov, d_typed, d_true):
     m = B.BlinkyModel()
     m.pixel_count = N
-    m.pitch_m = PITCH
+    m.pixel_pitch_m = PIXEL_PITCH
     for sid, a in enumerate([0, 75, 150, 225], start=1):
         m.add_session(B.SessionConfig(sid, a, d_typed, 1.5, hfov_deg=assumed_fov,
-                                      pitch_deg=15.0))
+                                      device_pitch_deg=15.0))
         P = B._projection_matrix(B.SessionConfig(sid, a, d_true, 1.5, hfov_deg=true_fov,
-                                                 pitch_deg=15.0))
+                                                 device_pitch_deg=15.0))
         for i, X in enumerate(pts):
             p = P @ np.append(X, 1.0)
             if p[2] > 0:

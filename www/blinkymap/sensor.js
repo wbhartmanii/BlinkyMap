@@ -15,7 +15,7 @@ import { Compass, angleDelta } from "./compass.js";
 import { CodedScan } from "./coded.js";
 import { Tilt, heightAboveAim, MAX_PITCH_DEG } from "./tilt.js";
 
-export const BUILD = "v38";
+export const BUILD = "v39";
 
 // Peak-to-peak movement across a capture, beyond which the pose recorded for
 // the session no longer describes all of its frames. Pitch comes from the
@@ -230,8 +230,8 @@ async function onMessage(msg) {
              found: nFound, missed: nMiss,
              // Mean over the capture beats the instantaneous value taken when
              // the session was created, and this lands before triangulation.
-             pitch_deg: drift.pitch ? drift.pitch.mean : null,
-             pitch_spread_deg: drift.pitch ? drift.pitch.spread : 0 });
+             device_pitch_deg: drift.devicePitch ? drift.devicePitch.mean : null,
+             device_pitch_spread_deg: drift.devicePitch ? drift.devicePitch.spread : 0 });
       drawFound(found);
       setCamStatus(`${nFound} seen · ${nMiss} not visible from here`,
                    nFound > 0 ? "cam-status-on" : "cam-status-off");
@@ -367,14 +367,14 @@ function renderTilt() {
   tiltReadout.style.display       = hasTilt ? "" : "none";
   manualHeightField.style.display = hasTilt ? "none" : "";
 
-  if (!hasTilt || tilt.pitch === null) {
+  if (!hasTilt || tilt.devicePitch === null) {
     aimPoint.className = "aim-idle";
     aimLabel.textContent = hasTilt ? "tilt —" : "no tilt";
     tiltValue.textContent = hasTilt ? "—" : "manual";
     tiltValue.className   = hasTilt ? "" : "tilt-warn";
     return;
   }
-  const p = tilt.pitch;
+  const p = tilt.devicePitch;
   const steep = Tilt.tooSteep(p);
   const dist  = toMeters(parseFloat(sessDist.value) || 2.0);
   const rise  = heightAboveAim(dist, p);
@@ -404,7 +404,7 @@ function beginCaptureSampling() {
 }
 
 function endCaptureSampling() {
-  const pitch = hasTilt ? tilt.endSample() : null;
+  const devicePitch = hasTilt ? tilt.endSample() : null;
   let heading = null;
   if (headingSamples && headingSamples.length) {
     // Circular: measure every sample against the first, so a scan straddling
@@ -415,7 +415,7 @@ function endCaptureSampling() {
                 n: headingSamples.length };
   }
   headingSamples = null;
-  lastDrift = { pitch, heading };
+  lastDrift = { devicePitch, heading };
   return lastDrift;
 }
 
@@ -423,8 +423,8 @@ function endCaptureSampling() {
 function driftWarning() {
   if (!lastDrift) return "";
   const bad = [];
-  if (lastDrift.pitch && lastDrift.pitch.spread > PITCH_DRIFT_WARN_DEG) {
-    bad.push(`tilt moved ${lastDrift.pitch.spread.toFixed(1)}°`);
+  if (lastDrift.devicePitch && lastDrift.devicePitch.spread > PITCH_DRIFT_WARN_DEG) {
+    bad.push(`tilt moved ${lastDrift.devicePitch.spread.toFixed(1)}°`);
   }
   if (lastDrift.heading && lastDrift.heading.spread > HEADING_DRIFT_WARN_DEG) {
     bad.push(`heading moved ${lastDrift.heading.spread.toFixed(0)}°`);
@@ -542,9 +542,9 @@ btnScanHere.addEventListener("click", () => {
     scanHint.textContent = "Set a 0° reference before scanning.";
     return;
   }
-  if (hasTilt && tilt.pitch !== null && Tilt.tooSteep(tilt.pitch)) {
+  if (hasTilt && tilt.devicePitch !== null && Tilt.tooSteep(tilt.devicePitch)) {
     scanHint.textContent =
-      `Aimed ${Math.abs(tilt.pitch).toFixed(0)}° from horizontal — past ` +
+      `Aimed ${Math.abs(tilt.devicePitch).toFixed(0)}° from horizontal — past ` +
       `${MAX_PITCH_DEG}° the height is dominated by your distance estimate. ` +
       `Step back, or raise the crosshair onto the prop.`;
     return;
@@ -558,10 +558,10 @@ btnScanHere.addEventListener("click", () => {
     img_width: camWidth,
     img_height: camHeight,
   };
-  if (hasTilt && tilt.pitch !== null) {
+  if (hasTilt && tilt.devicePitch !== null) {
     // Instantaneous value; the mean over the capture follows with the
     // detections and supersedes it before anything is triangulated.
-    payload.pitch_deg = tilt.pitch;
+    payload.device_pitch_deg = tilt.devicePitch;
   } else {
     payload.height = toMeters(parseFloat(sessHeight.value) ||
                               (units === "ft" ? 4.92 : 1.5));

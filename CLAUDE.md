@@ -91,7 +91,7 @@ into a single base-3 code with centroids accumulated by code.
   centres the prop under the crosshair, so **the aim point defines itself**: no
   one needs to know how high the prop's middle is. Both "camera height" and
   "prop centre height" fields are gone. A typed height survives only as the
-  fallback for a device with no accelerometer (`pitch_deg = None`).
+  fallback for a device with no accelerometer (`device_pitch_deg = None`).
 - **The crosshair is the measurement's definition, not decoration.** The video
   is `object-fit: contain` inside `#cam-wrap`, so the box centre is the image
   centre and a CSS-centred reticle sits on the optical axis with no arithmetic.
@@ -106,7 +106,7 @@ into a single base-3 code with centroids accumulated by code.
   `max-age=31536000, immutable`. That is fine for query-versioned JS and CSS,
   but a cached HTML page keeps requesting an old `?v=` forever — hours were lost
   re-testing code that had already been replaced. The installer sets `no-store`
-  on `*.html`. The sensor header also shows a build tag (`v38`); if it does not
+  on `*.html`. The sensor header also shows a build tag (`v39`); if it does not
   match what was deployed, nothing else matters.
 - **Asset cache busting** via `?v=N` on CSS/JS. Increment on every deploy.
 - **WebSocket proxy** through Apache at `/blinkymap-ws → ws://127.0.0.1:8765`
@@ -181,10 +181,14 @@ inflation.
 Set **String breaks** to the first pixel number of each new physical string, or
 every join reads as an impossible jump.
 
-**Naming collision, and it is genuinely confusing:** `pitch` means *camera tilt*
-in the session/tilt code (`sess.pitch_deg`, `grep "above aim point"`) and *LED
-spacing* here (`config.pitch_m`, `pitch_mm`). They are unrelated. The `_m`/`_mm`
-suffix marks the wire one; `_deg` marks the camera one.
+**Two unrelated things were both called `pitch`**, so neither is any more:
+LED spacing is **`pixel_pitch`** (`config.pixel_pitch_m`, `pixel_pitch_mm`,
+`cfgPixelPitch`) and camera tilt is **`device_pitch`** (`sess.device_pitch_deg`,
+`device_pitch_spread_deg`, `tilt.devicePitch`). The rule is that a bare `pitch`
+identifier does not appear anywhere in the codebase — if you are about to add
+one, you have to pick a side first. The wire-protocol keys were renamed to match
+(`device_pitch`, `device_pitch_spread`, `pixel_pitch_mm`); both ends ship
+together, so there is no compatibility window to worry about.
 
 Deliberately **not folded into the confidence score.** A model inflated 3x is not
 "40% as good" — it is a different kind of wrong, and no amount of extra scanning
@@ -327,9 +331,9 @@ No CI. Run both before trusting a geometry change:
 
 Quick server-side checks:
 - `grep _run_coded_scan /tmp/blinkymap_server.log` — frames and counts per scan.
-- `grep "above aim point" /tmp/blinkymap_server.log` — the measured tilt and the
-  camera height derived from it, per session. `pitch=none` means the phone fell
-  back to a typed height and the measurement never arrived.
+- `grep device_pitch= /tmp/blinkymap_server.log` — the measured tilt and the
+  camera height derived from it, per session. `device_pitch=none` means the
+  phone fell back to a typed height and the measurement never arrived.
 - `grep "Model after session" /tmp/blinkymap_server.log` — consensus and
   pairwise reprojection after each scan.
 - `grep chords /tmp/blinkymap_server.log` — neighbour-gap distribution vs pitch.

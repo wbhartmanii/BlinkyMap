@@ -26,7 +26,7 @@ WebSocket message protocol (JSON):
     {"type": "set_config",       "host": str, "universe": int, "start_ch": int,
                                   "pixel_count": int, "delay": float}
     {"type": "set_session",      "angle": float, "distance": float,
-                                 "pitch_deg": float, "pitch_spread_deg": float}
+                                 "device_pitch_deg": float, "device_pitch_spread_deg": float}
     {"type": "set_fov",          "hfov_deg": float, "width": int, "height": int}
     {"type": "start_scan"}
     {"type": "detection",        "index": int, "cx": float, "cy": float, "conf": float}
@@ -342,7 +342,7 @@ class ControllerConfig:
     # Spacing between LEDs measured ALONG THE WIRE. Zero means "not configured",
     # which disables every check that depends on it. This is never a known 3D
     # distance — see _neighbour_chords for what it can and cannot tell us.
-    pitch_m: float = 0.0
+    pixel_pitch_m: float = 0.0
     # 0-based indices where a new physical string starts, so pixel i-1 and i are
     # not wired neighbours and the pitch bound does not apply across the join.
     string_breaks: Tuple[int, ...] = ()
@@ -363,10 +363,10 @@ class SessionConfig:
     # the phone at capture time. This is the real input: with it, height_m is
     # not consulted at all. None means the device had no usable accelerometer
     # and the operator typed a height instead.
-    pitch_deg: Optional[float] = None
+    device_pitch_deg: Optional[float] = None
     # Peak-to-peak pitch swing across the capture. Recorded for diagnosis; the
     # sensor is what warns the operator.
-    pitch_spread_deg: float = 0.0
+    device_pitch_spread_deg: float = 0.0
 
 
 @dataclass
@@ -436,12 +436,12 @@ def _camera_geometry(sess: SessionConfig) -> Tuple[float, float]:
     zero puts the origin at the aim point instead of the floor; the export
     normalises that away.
     """
-    if sess.pitch_deg is None:
+    if sess.device_pitch_deg is None:
         # No usable accelerometer: fall back to the typed height, aiming at the
         # old half-height assumption. Worse, and known to be worse.
         return sess.height_m, sess.height_m * 0.5
-    pitch = max(-MAX_PITCH_DEG, min(MAX_PITCH_DEG, sess.pitch_deg))
-    return sess.distance_m * math.tan(math.radians(pitch)), 0.0
+    device_pitch = max(-MAX_PITCH_DEG, min(MAX_PITCH_DEG, sess.device_pitch_deg))
+    return sess.distance_m * math.tan(math.radians(device_pitch)), 0.0
 
 
 def _height_above_aim(sess: SessionConfig) -> float:
@@ -544,7 +544,7 @@ def _parse_breaks(raw, pixel_count: int) -> Tuple[int, ...]:
 def _neighbour_chords(
     results: Dict[int, "PixelResult"],
     pixel_count: int,
-    pitch_m: float,
+    pixel_pitch_m: float,
     breaks: Iterable[int] = (),
 ) -> Optional[dict]:
     """Distribution of straight-line distances between wired-adjacent pixels.
@@ -574,7 +574,7 @@ def _neighbour_chords(
     to their limit and would drag the percentile down — making an inflated model
     look acceptable. Wrong direction for a safety check; not worth the samples.
     """
-    if pitch_m <= 0 or pixel_count < 2:
+    if pixel_pitch_m <= 0 or pixel_count < 2:
         return None
 
     break_set = set(breaks)
@@ -615,17 +615,17 @@ def _neighbour_chords(
     # inside any real scale error.
     return {
         "pairs":      n,
-        "pitch_mm":   round(pitch_m * 1000, 1),
+        "pixel_pitch_mm":   round(pixel_pitch_m * 1000, 1),
         "median_mm":  round(float(np.median(arr)) * 1000, 1),
         "p90_mm":     round(float(np.percentile(arr, 90)) * 1000, 1),
         "robust_mm":  round(robust * 1000, 1),
         "robust_pct": round(pct, 1),
         "max_mm":     round(float(arr.max()) * 1000, 1),
-        "over_count": int((arr > pitch_m * 1.05).sum()),
-        "over_pitch": round(float((arr > pitch_m * 1.05).mean()), 3),
+        "over_count": int((arr > pixel_pitch_m * 1.05).sum()),
+        "over_pitch": round(float((arr > pixel_pitch_m * 1.05).mean()), 3),
         # Upper bound on the true scale correction; see docstring. Guarded
         # against a degenerate 0 when every pixel triangulates to one point.
-        "max_scale":  round(pitch_m / robust, 3) if robust > 1e-9 else None,
+        "max_scale":  round(pixel_pitch_m / robust, 3) if robust > 1e-9 else None,
     }
 
 
@@ -667,7 +667,7 @@ class BlinkyModel:
         self.pixel_count: int = 0
         # Pushed in from ControllerConfig alongside pixel_count. Zero pitch
         # disables the chord check entirely, so existing setups are unaffected.
-        self.pitch_m: float = 0.0
+        self.pixel_pitch_m: float = 0.0
         self.string_breaks: Tuple[int, ...] = ()
 
     def add_session(self, sess: SessionConfig):
@@ -785,7 +785,7 @@ class BlinkyModel:
         # Blending it into the score would also repeat the peak/255 mistake of
         # weighting a term before anyone had seen its dynamic range.
         chords = _neighbour_chords(self.results, self.pixel_count,
-                                   self.pitch_m, self.string_breaks)
+                                   self.pixel_pitch_m, self.string_breaks)
 
         # Ranked first when it fires: if the scale is wrong the geometry is
         # misread everywhere, including the pixels that look fine.
@@ -803,7 +803,7 @@ class BlinkyModel:
         # so a global scale fault got reported as scattered bad pixels.
         scale_broken = bool(
             chords and chords["pairs"] >= 8
-            and chords["median_mm"] > chords["pitch_mm"] * 1.05
+            and chords["median_mm"] > chords["pixel_pitch_mm"] * 1.05
         )
 
         # The other half of the pitch signal: chords that break the bound while
@@ -1221,8 +1221,8 @@ class BlinkyServer:
                             # Height above the AIM POINT, which is the only
                             # height the geometry uses.
                             "height":   _height_above_aim(sc),
-                            "pitch":    sc.pitch_deg,
-                            "pitch_spread": sc.pitch_spread_deg,
+                            "device_pitch": sc.device_pitch_deg,
+                            "device_pitch_spread": sc.device_pitch_spread_deg,
                             "detections": {
                                 i: {"cx": round(d.cx, 1), "cy": round(d.cy, 1),
                                     "conf": round(d.conf, 3)}
@@ -1310,10 +1310,10 @@ class BlinkyServer:
             # The pitch that arrives here is the mean over the capture window,
             # which is strictly better than the instantaneous value sampled when
             # the session was created — and it lands before triangulation.
-            if self.current_session is not None and msg.get("pitch_deg") is not None:
-                self.current_session.pitch_deg = float(msg["pitch_deg"])
-                self.current_session.pitch_spread_deg = float(
-                    msg.get("pitch_spread_deg", 0.0))
+            if self.current_session is not None and msg.get("device_pitch_deg") is not None:
+                self.current_session.device_pitch_deg = float(msg["device_pitch_deg"])
+                self.current_session.device_pitch_spread_deg = float(
+                    msg.get("device_pitch_spread_deg", 0.0))
             await self._coded_results.put(msg.get("detections") or {})
 
         elif t == "start_coded_scan":
@@ -1341,11 +1341,11 @@ class BlinkyServer:
             # Pitch arrives in mm — strings are sold as "100mm" or 4" (101.6mm),
             # and metres would put the only interesting digits after the decimal
             # point. Not routed through the UI's m/ft toggle for that reason.
-            self.config.pitch_m           = max(0.0, float(msg.get("pitch_mm", 0.0))) / 1000.0
+            self.config.pixel_pitch_m           = max(0.0, float(msg.get("pixel_pitch_mm", 0.0))) / 1000.0
             self.config.string_breaks     = _parse_breaks(msg.get("string_breaks"),
                                                           self.config.pixel_count)
             self.model.pixel_count        = self.config.pixel_count
-            self.model.pitch_m            = self.config.pitch_m
+            self.model.pixel_pitch_m            = self.config.pixel_pitch_m
             self.model.string_breaks      = self.config.string_breaks
             await self.broadcast(self._sensor_config(), role="sensor")
             await ws.send(json.dumps({"type": "status", "message": "Config saved"}))
@@ -1361,7 +1361,7 @@ class BlinkyServer:
                     angle = measured
             # The tilt is the real geometric input; a typed height is only the
             # fallback for a device that reports no orientation at all.
-            pitch = msg.get("pitch_deg")
+            device_pitch = msg.get("device_pitch_deg")
             self.current_session = SessionConfig(
                 session_id=sid,
                 angle_deg=float(angle),
@@ -1370,17 +1370,17 @@ class BlinkyServer:
                 hfov_deg=float(msg.get("hfov_deg", self.config.hfov_deg)),
                 img_width=int(msg.get("img_width", 1280)),
                 img_height=int(msg.get("img_height", 720)),
-                pitch_deg=None if pitch is None else float(pitch),
-                pitch_spread_deg=float(msg.get("pitch_spread_deg", 0.0)),
+                device_pitch_deg=None if device_pitch is None else float(device_pitch),
+                device_pitch_spread_deg=float(msg.get("device_pitch_spread_deg", 0.0)),
             )
             self.model.add_session(self.current_session)
             eye_y, aim_y = _camera_geometry(self.current_session)
-            log.info("Session %d: angle=%.1f dist=%.2fm pitch=%s -> camera %.2fm "
+            log.info("Session %d: angle=%.1f dist=%.2fm device_pitch=%s -> camera %.2fm "
                      "above aim point (spread %.1f deg)",
                      sid, self.current_session.angle_deg,
                      self.current_session.distance_m,
-                     "none" if pitch is None else f"{float(pitch):.1f}deg",
-                     eye_y - aim_y, self.current_session.pitch_spread_deg)
+                     "none" if device_pitch is None else f"{float(device_pitch):.1f}deg",
+                     eye_y - aim_y, self.current_session.device_pitch_spread_deg)
             await ws.send(json.dumps({"type": "status",
                                        "message": f"Session {sid} ready"}))
 
@@ -1693,8 +1693,8 @@ class BlinkyServer:
                                for i, d in det_dict.items()},
                 "angle": sess.angle_deg, "distance": sess.distance_m,
                 "height": _height_above_aim(sess),
-                "pitch": sess.pitch_deg,
-                "pitch_spread": sess.pitch_spread_deg,
+                "device_pitch": sess.device_pitch_deg,
+                "device_pitch_spread": sess.device_pitch_spread_deg,
             })
             self.model.triangulate()
             conf_summary = self.model.model_confidence()
@@ -1705,9 +1705,9 @@ class BlinkyServer:
                      conf_summary["limiting"])
             ch = conf_summary.get("chords")
             if ch:
-                log.info("chords: %d pairs, pitch %.1fmm, median %.1f p90 %.1f "
+                log.info("chords: %d pairs, pixel pitch %.1fmm, median %.1f p90 %.1f "
                          "p%.0f %.1f max %.1f, %.0f%% over pitch, max_scale %s",
-                         ch["pairs"], ch["pitch_mm"], ch["median_mm"], ch["p90_mm"],
+                         ch["pairs"], ch["pixel_pitch_mm"], ch["median_mm"], ch["p90_mm"],
                          ch["robust_pct"], ch["robust_mm"], ch["max_mm"],
                          ch["over_pitch"] * 100, ch["max_scale"])
             await self.broadcast({"type": "model", "pixels": self.model.to_json_pixels()})
@@ -1818,8 +1818,8 @@ class BlinkyServer:
                 "angle": sess.angle_deg,
                 "distance": sess.distance_m,
                 "height": _height_above_aim(sess),
-                "pitch": sess.pitch_deg,
-                "pitch_spread": sess.pitch_spread_deg,
+                "device_pitch": sess.device_pitch_deg,
+                "device_pitch_spread": sess.device_pitch_spread_deg,
             })
 
             # Triangulate and broadcast model

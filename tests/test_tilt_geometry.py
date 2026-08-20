@@ -7,7 +7,7 @@ in Y that the export normalises away.
 
 Ground truth is generated with the honest two-height model; reconstruction runs
 through the shipped `_projection_matrix`, which now derives its geometry from
-the pitch alone.
+the device_pitch alone.
 """
 import math
 import os
@@ -52,7 +52,7 @@ def spiral_prop(n=40, radius=0.6, height=1.8, base=0.35):
     return pts
 
 
-def run(angles, dist, cam_h, prop_centre_h, pitch_noise_deg=0.0, seed=0):
+def run(angles, dist, cam_h, prop_centre_h, device_pitch_noise_deg=0.0, seed=0):
     rng = np.random.default_rng(seed)
     pts = spiral_prop()
     model = BlinkyModel()
@@ -62,13 +62,13 @@ def run(angles, dist, cam_h, prop_centre_h, pitch_noise_deg=0.0, seed=0):
         P_true = truth_projection(ang, dist, cam_h, prop_centre_h)
         # What the phone measures standing there: the depression of the optical
         # axis, which is fixed by the geometry it is actually in.
-        pitch = math.degrees(math.atan2(cam_h - prop_centre_h, dist))
-        pitch += rng.normal(0.0, pitch_noise_deg)
+        device_pitch = math.degrees(math.atan2(cam_h - prop_centre_h, dist))
+        device_pitch += rng.normal(0.0, device_pitch_noise_deg)
 
         sess = SessionConfig(session_id=k, angle_deg=ang, distance_m=dist,
                              height_m=-999.0,          # must never be consulted
                              hfov_deg=FOV, img_width=W, img_height=H,
-                             pitch_deg=pitch)
+                             device_pitch_deg=device_pitch)
         model.add_session(sess)
         for i, X in enumerate(pts):
             u, v = project(P_true, X)
@@ -124,7 +124,7 @@ def test_pitch_noise_degrades_gracefully():
     pts, _ = run([0, 90, 180, 270], dist=2.5, cam_h=1.55, prop_centre_h=1.25)
     for noise, budget in [(1.0, 0.02), (2.0, 0.05)]:
         _, model = run([0, 90, 180, 270], dist=2.5, cam_h=1.55,
-                       prop_centre_h=1.25, pitch_noise_deg=noise, seed=7)
+                       prop_centre_h=1.25, device_pitch_noise_deg=noise, seed=7)
         got = {i: pr.position for i, pr in model.results.items()
                if pr.position is not None}
         err = np.array([got[i] - pts[i] for i in sorted(got)])
@@ -135,13 +135,13 @@ def test_pitch_noise_degrades_gracefully():
 
 def test_no_pitch_falls_back_to_the_typed_height():
     sess = SessionConfig(session_id=0, angle_deg=0, distance_m=2.0, height_m=1.5,
-                         pitch_deg=None)
+                         device_pitch_deg=None)
     assert _camera_geometry(sess) == (1.5, 0.75)
 
 
 def test_pitch_is_clamped_before_tan_explodes():
     steep = SessionConfig(session_id=0, angle_deg=0, distance_m=2.0, height_m=1.5,
-                          pitch_deg=89.0)
+                          device_pitch_deg=89.0)
     eye_y, aim_y = _camera_geometry(steep)
     assert aim_y == 0.0
     assert eye_y == 2.0 * math.tan(math.radians(60.0))
@@ -150,9 +150,9 @@ def test_pitch_is_clamped_before_tan_explodes():
 def test_the_measurement_replaces_the_two_typed_numbers_exactly():
     """h - t = d·tan(θ), on the geometry the server actually builds."""
     for dist, cam_h, prop_h in [(2.0, 1.5, 1.0), (3.5, 1.6, 0.0), (2.5, 1.2, 2.0)]:
-        pitch = math.degrees(math.atan2(cam_h - prop_h, dist))
+        device_pitch = math.degrees(math.atan2(cam_h - prop_h, dist))
         sess = SessionConfig(session_id=0, angle_deg=0, distance_m=dist,
-                             height_m=-999.0, pitch_deg=pitch)
+                             height_m=-999.0, device_pitch_deg=device_pitch)
         eye_y, aim_y = _camera_geometry(sess)
         assert abs((eye_y - aim_y) - (cam_h - prop_h)) < 1e-9
 
@@ -176,10 +176,10 @@ def test_consensus_error_exceeds_the_pairwise_figure_under_noise():
     model.pixel_count = len(pts)
     for k, ang in enumerate(_FOUR_ANGLES):
         P = truth_projection(ang, 2.5, 1.55, 1.25)
-        pitch = math.degrees(math.atan2(1.55 - 1.25, 2.5))
+        device_pitch = math.degrees(math.atan2(1.55 - 1.25, 2.5))
         model.add_session(SessionConfig(session_id=k, angle_deg=ang, distance_m=2.5,
                                         height_m=-999.0, hfov_deg=FOV,
-                                        img_width=W, img_height=H, pitch_deg=pitch))
+                                        img_width=W, img_height=H, device_pitch_deg=device_pitch))
         for i, X in enumerate(pts):
             u, v = project(P, X)
             model.record_detection(k, i, Detection(cx=u + rng.normal(0, 3),

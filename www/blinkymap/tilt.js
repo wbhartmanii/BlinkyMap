@@ -59,7 +59,7 @@ export const MAX_PITCH_DEG = 60;
 export class Tilt {
   constructor() {
     this.onPitch  = null;
-    this.pitch    = null;   // degrees; + = aimed below horizontal
+    this.devicePitch    = null;   // degrees; + = aimed below horizontal
     this.running  = false;
     this._handler = null;
     this._samples = null;   // non-null while a scan is being sampled
@@ -98,9 +98,9 @@ export class Tilt {
 
     // A listener can attach and stay silent on hardware with no accelerometer.
     const gotSignal = await new Promise((resolve) => {
-      const t = setTimeout(() => resolve(this.pitch !== null), 1500);
+      const t = setTimeout(() => resolve(this.devicePitch !== null), 1500);
       const probe = setInterval(() => {
-        if (this.pitch !== null) { clearTimeout(t); clearInterval(probe); resolve(true); }
+        if (this.devicePitch !== null) { clearTimeout(t); clearInterval(probe); resolve(true); }
       }, 100);
       setTimeout(() => clearInterval(probe), 1600);
     });
@@ -127,13 +127,13 @@ export class Tilt {
     const up  = Math.max(-1, Math.min(1, Math.cos(b) * Math.cos(g)));
     const deg = Math.asin(up) * 180 / Math.PI;
 
-    this.pitch = deg;
+    this.devicePitch = deg;
     if (this._samples) this._samples.push(deg);
     if (this.onPitch) this.onPitch(deg);
   }
 
   /** Begin accumulating samples for the scan about to run. */
-  beginSample() { this._samples = this.pitch === null ? [] : [this.pitch]; }
+  beginSample() { this._samples = this.devicePitch === null ? [] : [this.devicePitch]; }
 
   /**
    * Close the sampling window.
@@ -158,7 +158,7 @@ export class Tilt {
 }
 
 /** Camera height above its own aim point, from the leg you typed and the leg measured. */
-export function heightAboveAim(distance_m, pitch_deg) {
-  const clamped = Math.max(-MAX_PITCH_DEG, Math.min(MAX_PITCH_DEG, pitch_deg));
+export function heightAboveAim(distance_m, device_pitch_deg) {
+  const clamped = Math.max(-MAX_PITCH_DEG, Math.min(MAX_PITCH_DEG, device_pitch_deg));
   return distance_m * Math.tan(clamped * Math.PI / 180);
 }

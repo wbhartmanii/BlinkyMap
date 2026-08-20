@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>BlinkyMap Control</title>
-  <link rel="stylesheet" href="style.css?v=38" />
+  <link rel="stylesheet" href="style.css?v=39" />
 
   <!-- Import map for Three.js (served locally after install.sh) -->
   <script type="importmap">
@@ -86,7 +86,7 @@
 
   <h2>Prop geometry</h2>
   <label>Pixel pitch (mm, 0 = unknown)
-    <input id="cfg-pitch" type="number" value="0" min="0" max="2000" step="1" />
+    <input id="cfg-pixel-pitch" type="number" value="0" min="0" max="2000" step="1" />
     <span class="slider-hint">Spacing between LEDs measured <em>along the wire</em>.
       4&Prime;&nbsp;=&nbsp;101.6, 3&Prime;&nbsp;=&nbsp;76.2. Used only as a sanity
       check: two LEDs can never be further apart in 3D than their pitch, so this
@@ -180,7 +180,7 @@
   </ol>
 </section>
 
-<script type="module" src="control.js?v=38"></script>
+<script type="module" src="control.js?v=39"></script>
 <p class="slider-hint" style="padding:0 1rem 1rem"><a href="./">&larr; change role</a></p>
 </body>
 </html>

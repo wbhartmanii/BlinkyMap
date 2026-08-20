@@ -30,7 +30,7 @@ function fullMatrixDepression(a, b, g) {
 }
 
 /** Drive a Tilt instance the way the browser would. */
-function feed(t, beta, gamma) { t._onEvent({ beta, gamma }); return t.pitch; }
+function feed(t, beta, gamma) { t._onEvent({ beta, gamma }); return t.devicePitch; }
 
 test("closed form matches the full rotation matrix everywhere", () => {
   const t = new Tilt();
@@ -72,17 +72,17 @@ test("portrait and landscape agree for the same physical aim", () => {
 test("garbage events are ignored rather than poisoning the reading", () => {
   const t = new Tilt();
   feed(t, 60, 0);
-  const good = t.pitch;
+  const good = t.devicePitch;
   t._onEvent({ beta: null, gamma: 0 });
   t._onEvent({ beta: 60, gamma: NaN });
   t._onEvent({});
-  assert.equal(t.pitch, good);
+  assert.equal(t.devicePitch, good);
 });
 
 test("h - t = d·tan(theta), which is the whole point", () => {
   for (const [dist, camH, propH] of [[2.0, 1.5, 1.0], [3.5, 1.6, 0.0], [2.5, 1.2, 2.0]]) {
-    const pitch = r2d(Math.atan2(camH - propH, dist));
-    assert.ok(Math.abs(heightAboveAim(dist, pitch) - (camH - propH)) < 1e-9);
+    const devicePitch = r2d(Math.atan2(camH - propH, dist));
+    assert.ok(Math.abs(heightAboveAim(dist, devicePitch) - (camH - propH)) < 1e-9);
   }
 });
 

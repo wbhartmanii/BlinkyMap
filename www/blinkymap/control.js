@@ -28,7 +28,7 @@ const cfgPixels      = document.getElementById("cfg-pixels");
 const cfgDelay       = document.getElementById("cfg-delay");
 const cfgFov         = document.getElementById("cfg-fov");
 const cfgMinConf     = document.getElementById("cfg-min-conf");
-const cfgPitch       = document.getElementById("cfg-pitch");
+const cfgPixelPitch  = document.getElementById("cfg-pixel-pitch");
 const cfgBreaks      = document.getElementById("cfg-breaks");
 const cfgMinConfVal  = document.getElementById("cfg-min-conf-val");
 const btnSaveConfig      = document.getElementById("btn-save-config");
@@ -153,7 +153,7 @@ async function handleServerMessage(msg) {
       scanBlock.style.display = "none";
       addSessionCard(msg.session, msg.detected, msg.total, msg.detections || {},
                      msg.angle ?? 0, msg.distance ?? 2, msg.height ?? 1.5,
-                     msg.pitch ?? null, msg.pitch_spread ?? 0);
+                     msg.device_pitch ?? null, msg.device_pitch_spread ?? 0);
       statusMsg(`Session ${msg.session}: ${msg.detected}/${msg.total} detected`);
       break;
 
@@ -166,7 +166,7 @@ async function handleServerMessage(msg) {
       for (const s of msg.sessions || []) {
         addSessionCard(s.session, s.detected, s.total, s.detections || {},
                        s.angle ?? 0, s.distance ?? 2, s.height ?? 1.5,
-                       s.pitch ?? null, s.pitch_spread ?? 0);
+                       s.device_pitch ?? null, s.device_pitch_spread ?? 0);
       }
       break;
 
@@ -233,7 +233,7 @@ function sendConfig() {
     hfov_deg:    parseFloat(cfgFov.value),
     // Pitch stays in mm and does NOT go through toMeters — strings are sold in
     // mm or inches, and the m/ft toggle would render a 4" pitch as "0.33 ft".
-    pitch_mm:      parseFloat(cfgPitch.value) || 0,
+    pixel_pitch_mm:      parseFloat(cfgPixelPitch.value) || 0,
     string_breaks: cfgBreaks.value.trim(),
   });
 }
@@ -321,20 +321,20 @@ function updateProgress(done, total) {
   progressLabel.textContent = `${done} / ${total}`;
 }
 
-function sessionPosStr(angle, distM, heightM, pitch) {
+function sessionPosStr(angle, distM, heightM, devicePitch) {
   // heightM is the camera's height above its AIM POINT, not above the floor —
   // the floor never enters the geometry.
   const rise = `${heightM >= 0 ? "+" : "−"}${formatDist(Math.abs(heightM))} above aim`;
-  const how = (pitch === null || pitch === undefined)
+  const how = (devicePitch === null || devicePitch === undefined)
     ? "typed"
-    : `${pitch.toFixed(1)}° tilt`;
+    : `${devicePitch.toFixed(1)}° tilt`;
   return `${Math.round(angle)}° · ${formatDist(distM)} away · ${rise} · ${how}`;
 }
 
 function addSessionCard(sessionId, detected, total, detections, angleDeg, distM, heightM,
-                        pitch = null, pitchSpread = 0) {
+                        devicePitch = null, devicePitchSpread = 0) {
   sessions.push({ id: sessionId, detected, total, detections, angleDeg, distM, heightM,
-                  pitch, pitchSpread });
+                  devicePitch, devicePitchSpread });
   const pct = total > 0 ? Math.round((detected / total) * 100) : 0;
   const badge = pct >= 70 ? "badge-good" : pct >= 40 ? "badge-medium" : "badge-poor";
 
@@ -368,7 +368,7 @@ function addSessionCard(sessionId, detected, total, detections, angleDeg, distM,
     <div class="session-card-header">
       <div class="sess-title">
         <div class="sess-name">Session ${sessionId}</div>
-        <div class="sess-pos">${sessionPosStr(angleDeg, distM, heightM, pitch)}</div>
+        <div class="sess-pos">${sessionPosStr(angleDeg, distM, heightM, devicePitch)}</div>
       </div>
       <span class="badge ${badge}">${detected}/${total} (${pct}%)</span>
       <span class="sess-chevron">▸</span>
@@ -425,7 +425,7 @@ function updateConfidence(msg) {
   // low-scoring model, it is a different kind of wrong.
   const ch = msg.chords;
   if (ch) {
-    det += ` · Neighbour gap ${ch.median_mm}mm median / ${ch.pitch_mm}mm pitch`;
+    det += ` · Neighbour gap ${ch.median_mm}mm median / ${ch.pixel_pitch_mm}mm pixel pitch`;
     if (ch.over_count > 0) det += ` · ${ch.over_count} impossible`;
   }
   confidenceDet.textContent = det;
@@ -446,9 +446,9 @@ function updateConfidence(msg) {
     // is at least this much too big, never that it is too small.
     const times = ch?.max_scale ? (1 / ch.max_scale).toFixed(1) : "?";
     tip = `Impossible geometry: the median gap between neighbouring pixels is ` +
-          `${ch?.median_mm}mm on a ${ch?.pitch_mm}mm string, so the model is at ` +
+          `${ch?.median_mm}mm on a ${ch?.pixel_pitch_mm}mm string, so the model is at ` +
           `least ${times}x too big. Two LEDs cannot be further apart than their ` +
-          `pitch. Check the distance you entered for each position, and the ` +
+          `pixel pitch. Check the distance you entered for each position, and the ` +
           `horizontal FOV — both scale the whole reconstruction.`;
   } else if (pct < 20) {
     tip = `Only ${msg.high + msg.medium} pixels triangulated so far. Try more angles or lower the detection confidence threshold.`;
@@ -470,7 +470,7 @@ function updateConfidence(msg) {
         break;
       case "impossible":
         tip = `${ch?.over_count} of ${ch?.pairs} neighbouring pairs sit further apart ` +
-              `than the ${ch?.pitch_mm}mm pitch allows (worst ${ch?.max_mm}mm), while ` +
+              `than the ${ch?.pixel_pitch_mm}mm pixel pitch allows (worst ${ch?.max_mm}mm), while ` +
               `the rest of the string looks right. That is ` +
               `individual pixels landing in the wrong place, not a scale problem — ` +
               `scan those from another angle. If the string is actually several ` +
