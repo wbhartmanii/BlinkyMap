@@ -15,7 +15,7 @@ import { Compass, angleDelta } from "./compass.js";
 import { CodedScan } from "./coded.js";
 import { Tilt, heightAboveAim, MAX_PITCH_DEG } from "./tilt.js";
 
-export const BUILD = "v35";
+export const BUILD = "v36";
 
 // Peak-to-peak movement across a capture, beyond which the pose recorded for
 // the session no longer describes all of its frames. Pitch comes from the
@@ -163,6 +163,23 @@ async function onMessage(msg) {
                    "cam-status-bg");
       break;
 
+    case "coded_dark": {
+      // Everything is off: whatever still shows is not one of ours.
+      if (!coded || !camPreview.srcObject) {
+        send({ type: "coded_frame_captured", index: -1 });
+        break;
+      }
+      await sleep(140);
+      const dctx = camCanvas.getContext("2d", { willReadFrequently: true });
+      dctx.drawImage(camPreview, 0, 0, camCanvas.width, camCanvas.height);
+      const blocked = coded.setMask(
+        dctx.getImageData(0, 0, camCanvas.width, camCanvas.height));
+      setCamStatus(`Masked stray light (${(blocked * 100).toFixed(1)}% of frame)`,
+                   blocked > 0.25 ? "cam-status-bg" : "cam-status-on");
+      send({ type: "coded_frame_captured", index: -1 });
+      break;
+    }
+
     case "coded_frame": {
       if (!coded || !camPreview.srcObject) {
         send({ type: "coded_frame_captured", index: msg.index });
@@ -172,7 +189,7 @@ async function onMessage(msg) {
       await sleep(140);
       const ctx = camCanvas.getContext("2d", { willReadFrequently: true });
       ctx.drawImage(camPreview, 0, 0, camCanvas.width, camCanvas.height);
-      coded.addFrame(ctx.getImageData(0, 0, camCanvas.width, camCanvas.height));
+      coded.addFrame(ctx.getImageData(0, 0, camCanvas.width, camCanvas.height), msg.index);
       setCamStatus(`Captured frame ${msg.index + 1} / ${msg.total}`, "cam-status-on");
       send({ type: "coded_frame_captured", index: msg.index });
       break;
@@ -186,7 +203,16 @@ async function onMessage(msg) {
         break;
       }
       setCamStatus("Resolving pixel positions…", "cam-status-bg");
-      const { found, misses } = coded.resolve(codedWords);
+      const { found, misses, incomplete } = coded.resolve(codedWords);
+      if (incomplete) {
+        // Refusing beats returning nonsense: with a frame missing every code is
+        // compared against the wrong digits and nothing would resolve anyway.
+        setCamStatus(`Missed frame ${incomplete.map(i => i + 1).join(", ")} — scan again`,
+                     "cam-status-off");
+        send({ type: "coded_detections", detections: {}, incomplete });
+        coded.dispose(); coded = null;
+        break;
+      }
       const out = {};
       for (const k of Object.keys(found)) {
         const p = found[k];

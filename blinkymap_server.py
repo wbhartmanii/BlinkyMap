@@ -1421,6 +1421,20 @@ class BlinkyServer:
                 "pixel_count": total, "words": words,
             })
 
+            # Reference frame with nothing lit. Anything still glowing is not
+            # ours — a controller status LED, a standby lamp — and gets masked
+            # out. Near such a light the camera sees it PLUS the string's
+            # reflection, so the dominant channel flips frame to frame and the
+            # region can produce a valid-looking code.
+            await loop.run_in_executor(None, output.all_off)
+            await asyncio.sleep(max(cfg.inter_pixel_delay, 0.25))
+            self._frame_captured.clear()
+            await self.broadcast({"type": "coded_dark"})
+            try:
+                await asyncio.wait_for(self._frame_captured.wait(), timeout=10.0)
+            except asyncio.TimeoutError:
+                log.warning("No dark-frame ack within 10s — scanning without a mask")
+
             for f in range(digits):
                 pattern = coded_frame_pattern(total, f, digits)
                 await loop.run_in_executor(
@@ -1428,13 +1442,21 @@ class BlinkyServer:
                 # Let the string latch and the camera settle before capturing.
                 await asyncio.sleep(max(cfg.inter_pixel_delay, 0.25))
 
-                self._frame_captured.clear()
-                await self.broadcast({"type": "coded_frame",
-                                      "index": f, "total": digits})
-                try:
-                    await asyncio.wait_for(self._frame_captured.wait(), timeout=10.0)
-                except asyncio.TimeoutError:
-                    log.warning("Frame %d: no capture ack within 10s", f)
+                # One retry. A frame the sensor never captures shifts every
+                # later frame into the wrong digit position, and since a code
+                # only resolves when every digit matches, one dropped ack
+                # silently voids the entire scan.
+                for attempt in (1, 2):
+                    self._frame_captured.clear()
+                    t0 = time.time()
+                    await self.broadcast({"type": "coded_frame",
+                                          "index": f, "total": digits})
+                    try:
+                        await asyncio.wait_for(self._frame_captured.wait(), timeout=6.0)
+                        log.debug("Frame %d acked in %.2fs", f, time.time() - t0)
+                        break
+                    except asyncio.TimeoutError:
+                        log.warning("Frame %d: no ack in 6s (attempt %d)", f, attempt)
                 await self.broadcast({"type": "progress", "index": f, "total": digits})
 
             await loop.run_in_executor(None, output.all_off)
@@ -1489,9 +1511,6 @@ class BlinkyServer:
 
             # Relight for framing the next position. The operator is about to
             # walk somewhere new and needs to see the prop to aim at it.
-            if self.aim_light_pref:
-                await self._set_aim_light(True)
-
         except asyncio.CancelledError:
             await loop.run_in_executor(None, output.all_off)
             await self.broadcast({"type": "status", "message": "Scan stopped"})
@@ -1503,6 +1522,13 @@ class BlinkyServer:
                 await loop.run_in_executor(None, output.close)
             except Exception:
                 pass
+
+        # Relight AFTER the scan's own output is closed. close() calls all_off(),
+        # so relighting inside the try was undone moments later: the server and
+        # the phone both believed the light was on while the string was dark,
+        # and the operator's next tap only toggled that belief.
+        if self.aim_light_pref:
+            await self._set_aim_light(True)
 
     async def _run_scan(self):
         sess = self.current_session

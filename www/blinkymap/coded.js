@@ -37,7 +37,45 @@ export class CodedScan {
     this.frames = frames;
     this.captured = 0;
     // One class byte per image pixel per frame: 0=R, 1=G, 2=B, 3=undecided.
-    this.classes = [];
+    // Sparse and index-addressed, so a missed frame is detectable.
+    this.classes = new Array(frames);
+    this.mask = null;   // set by setMask() from an all-dark reference frame
+  }
+
+  /**
+   * Mask out everything already glowing before any pixel is lit.
+   *
+   * A steady light in view — a controller status LED, a standby lamp, a window
+   * — is not simply ignored by the coding. Close to it the camera sees that
+   * light PLUS whatever the string reflects, so as the string cycles red, green
+   * and blue the dominant channel flips and the region produces a varying code
+   * that can land on a real pixel index. A perfectly steady source is rejected
+   * by the checksum (all-one-digit codes are never valid words), but a
+   * contaminated one is not.
+   *
+   * Masking those pixels up front removes the whole class of problem, and costs
+   * one frame.
+   */
+  setMask(imageData, level = 30) {
+    const d = imageData.data;
+    const n = this.w * this.h;
+    const mask = new Uint8Array(n);
+    let blocked = 0;
+    for (let p = 0, i = 0; p < n; p++, i += 4) {
+      if (d[i] >= level || d[i + 1] >= level || d[i + 2] >= level) {
+        mask[p] = 1;
+        blocked++;
+      }
+    }
+    this.mask = mask;
+    return blocked / n;
+  }
+
+  /** Indices of frames that were requested but never captured. */
+  missingFrames() {
+    const out = [];
+    for (let f = 0; f < this.frames; f++) if (!this.classes[f]) out.push(f);
+    return out;
   }
 
   /**
@@ -48,11 +86,13 @@ export class CodedScan {
    * satisfy a code. `margin` is how far ahead the winner must be — raising it
    * trades detections for certainty.
    */
-  addFrame(imageData, minLevel = 40, margin = 1.25) {
+  addFrame(imageData, index, minLevel = 40, margin = 1.25) {
     const d = imageData.data;
     const n = this.w * this.h;
     const cls = new Uint8Array(n);
+    const mask = this.mask;
     for (let p = 0, i = 0; p < n; p++, i += 4) {
+      if (mask && mask[p]) { cls[p] = CLASS_NONE; continue; }
       const r = d[i], g = d[i + 1], b = d[i + 2];
       let c = CLASS_NONE;
       if (r >= minLevel && r >= g * margin && r >= b * margin)      c = 0;
@@ -60,8 +100,13 @@ export class CodedScan {
       else if (b >= minLevel && b >= r * margin && b >= g * margin) c = 2;
       cls[p] = c;
     }
-    this.classes.push(cls);
-    this.captured++;
+    // Stored BY INDEX, not appended. A frame the phone never captured — the
+    // server gives up after a timeout and lights the next pattern regardless —
+    // would otherwise shift every later frame into the wrong digit position,
+    // and since a code is only satisfied when every digit matches, the scan
+    // resolves nothing at all rather than failing loudly.
+    this.classes[index] = cls;
+    this.captured = this.classes.filter(Boolean).length;
     return this.captured;
   }
 
@@ -76,7 +121,7 @@ export class CodedScan {
 
     for (let p = 0; p < n; p++) {
       let code = 0, ok = true;
-      for (let f = 0; f < F; f++) {
+      for (let f = 0; f < F; f++) {   // F === this.frames once complete
         const c = this.classes[f][p];
         if (c === CLASS_NONE) { ok = false; break; }
         code = code * 3 + c;
@@ -100,6 +145,12 @@ export class CodedScan {
    * @returns {{found: Object, misses: Object}}
    */
   resolve(words, minArea = 6, maxSpread = 0.06, edgeFrac = 0.02) {
+    const missing = this.missingFrames();
+    if (missing.length) {
+      // Refuse rather than return confident nonsense: with a frame missing,
+      // every code is compared against the wrong digits.
+      return { found: {}, misses: {}, incomplete: missing };
+    }
     const stats = this._accumulate();
     const found = {}, misses = {};
     const diag = Math.hypot(this.w, this.h);
