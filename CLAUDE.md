@@ -140,8 +140,12 @@ Measured on real four-position scans of the same prop:
 
 ## Reprojection error — history on the same prop
 Useful for judging whether a change actually helped. Consensus metric (median
-error of each pixel's consensus point across all views), not the server's
-per-pair figure, which is roughly half.
+error of each pixel's consensus point across all views), not the per-pair
+figure, which runs about half — measured at 2.08x on synthetic data, because
+each pairwise candidate is fitted to the very two views it is then scored
+against. **The server now computes both**: the Control tab shows
+`Reproj <consensus>px (<pairwise>px pairwise)` and every scan logs the pair.
+Use the consensus number in this table.
 
 | state | px |
 |---|---|
@@ -259,4 +263,9 @@ No CI. Run both before trusting a geometry change:
 
 Quick server-side checks:
 - `grep _run_coded_scan /tmp/blinkymap_server.log` — frames and counts per scan.
+- `grep "above aim point" /tmp/blinkymap_server.log` — the measured tilt and the
+  camera height derived from it, per session. `pitch=none` means the phone fell
+  back to a typed height and the measurement never arrived.
+- `grep "Model after session" /tmp/blinkymap_server.log` — consensus and
+  pairwise reprojection after each scan.
 - `curl -s http://<fpp-ip>/api/testmode` — confirms what FPP is driving.

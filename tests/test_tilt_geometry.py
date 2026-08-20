@@ -155,3 +155,39 @@ def test_the_measurement_replaces_the_two_typed_numbers_exactly():
                              height_m=-999.0, pitch_deg=pitch)
         eye_y, aim_y = _camera_geometry(sess)
         assert abs((eye_y - aim_y) - (cam_h - prop_h)) < 1e-9
+
+
+def test_consensus_error_is_zero_on_exact_data():
+    _, model = run([0, 90, 180, 270], dist=2.5, cam_h=1.55, prop_centre_h=1.25)
+    conf = model.model_confidence()
+    assert conf["consensus_px"] < 0.1, f"consensus {conf['consensus_px']}px on exact data"
+
+
+def test_consensus_error_exceeds_the_pairwise_figure_under_noise():
+    """Why the history table is kept in consensus px.
+
+    Each pairwise candidate is fitted to the very two views it is then scored
+    against, so it flatters itself. The consensus point is fitted to none of
+    them individually and is the honest number.
+    """
+    pts = spiral_prop()
+    rng = np.random.default_rng(3)
+    model = BlinkyModel()
+    model.pixel_count = len(pts)
+    for k, ang in enumerate(_FOUR_ANGLES):
+        P = truth_projection(ang, 2.5, 1.55, 1.25)
+        pitch = math.degrees(math.atan2(1.55 - 1.25, 2.5))
+        model.add_session(SessionConfig(session_id=k, angle_deg=ang, distance_m=2.5,
+                                        height_m=-999.0, hfov_deg=FOV,
+                                        img_width=W, img_height=H, pitch_deg=pitch))
+        for i, X in enumerate(pts):
+            u, v = project(P, X)
+            model.record_detection(k, i, Detection(cx=u + rng.normal(0, 3),
+                                                   cy=v + rng.normal(0, 3), conf=1.0))
+    model.triangulate()
+    conf = model.model_confidence()
+    assert conf["consensus_px"] > conf["reproj_px"], (
+        f"consensus {conf['consensus_px']} should exceed pairwise {conf['reproj_px']}")
+
+
+_FOUR_ANGLES = [0, 90, 180, 270]

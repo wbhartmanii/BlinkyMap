@@ -407,9 +407,13 @@ function updateConfidence(msg) {
   confidencePct.style.color  = hue;
   confidenceGrade.style.color = hue;
 
+  const reproj = msg.consensus_px !== undefined
+    ? ` · Reproj ${msg.consensus_px}px (${msg.reproj_px}px pairwise)`
+    : "";
   confidenceDet.textContent =
     `Coverage ${Math.round((msg.coverage ?? 0)*100)}% · ` +
-    `High ${msg.high ?? 0} · Med ${msg.medium ?? 0} · Low ${msg.low ?? 0} · Unseen ${msg.unseen ?? 0}`;
+    `High ${msg.high ?? 0} · Med ${msg.medium ?? 0} · Low ${msg.low ?? 0} · ` +
+    `Unseen ${msg.unseen ?? 0}${reproj}`;
 
   // Contextual tip
   const nSess = sessions.length;
@@ -438,7 +442,7 @@ function updateConfidence(msg) {
         break;
       case "accuracy":
         tip = `Coverage and angle spread are already maxed, so more scans will not ` +
-              `raise this score. Reprojection error is ${msg.reproj_px}px — the limit ` +
+              `raise this score. Reprojection error is ${msg.consensus_px}px — the limit ` +
               `is detection precision and how accurately the distance was entered ` +
               `(the camera height is measured, not typed). Spread the pixels out, ` +
               `or re-measure your distance.`;

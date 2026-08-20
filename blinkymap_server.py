@@ -501,6 +501,13 @@ class PixelResult:
     position: Optional[np.ndarray] = None
     confidence: float = 0.0
     reprojection_error: float = 0.0
+    # Error of the CONSENSUS point against every view that saw this pixel, as
+    # opposed to `reprojection_error`, which averages the two views of each
+    # pair that produced a candidate. The pairwise figure flatters itself: each
+    # candidate is fitted to the very two views it is scored against, so it runs
+    # around half the consensus error. The history table in CLAUDE.md is in
+    # consensus px, so this is the number to compare against it.
+    consensus_error: float = 0.0
     sessions_detected: List[int] = field(default_factory=list)
 
     @property
@@ -581,6 +588,11 @@ class BlinkyModel:
                 if candidates:
                     pos = np.median(np.array(candidates), axis=0)
                     mean_err = float(np.median(reproj_errors))
+                    # Score the consensus point against every view that saw it.
+                    consensus_errs = [
+                        _reprojection_error(proj[sid][0], pos, (d.cx, d.cy))
+                        for sid, d in obs
+                    ]
                     spread = _angular_spread([proj[s_id] for s_id in paired_sids])
                     n = len(obs)
                     coverage = min(n / max(len(self.sessions), 1), 1.0)
@@ -590,6 +602,7 @@ class BlinkyModel:
                     pr.position = pos
                     pr.confidence = float(np.clip(conf, 0.0, 1.0))
                     pr.reprojection_error = mean_err
+                    pr.consensus_error = float(np.median(consensus_errs))
 
             results[idx] = pr
 
@@ -618,6 +631,9 @@ class BlinkyModel:
         reproj = [pr.reprojection_error for pr in self.results.values()
                   if pr.position is not None]
         mean_reproj = float(np.median(reproj)) if reproj else 0.0
+        consensus = [pr.consensus_error for pr in self.results.values()
+                     if pr.position is not None]
+        median_consensus = float(np.median(consensus)) if consensus else 0.0
         spread = _angular_spread([(None, sc) for sc, _ in self.sessions.values()])
         accuracy = max(0.0, 1.0 - mean_reproj / 20.0)
 
@@ -646,6 +662,7 @@ class BlinkyModel:
             "mean_confidence": round(mean_conf, 3),
             "spread": round(spread, 3),
             "reproj_px": round(mean_reproj, 1),
+            "consensus_px": round(median_consensus, 1),
             "limiting": limiting,
             "sessions": len(self.sessions),
             **grades,
@@ -1340,8 +1357,14 @@ class BlinkyServer:
                 "pitch_spread": sess.pitch_spread_deg,
             })
             self.model.triangulate()
+            conf_summary = self.model.model_confidence()
+            log.info("Model after session %d: %d sessions, reproj %.1fpx pairwise / "
+                     "%.1fpx consensus, limiting=%s",
+                     sess.session_id, conf_summary["sessions"],
+                     conf_summary["reproj_px"], conf_summary["consensus_px"],
+                     conf_summary["limiting"])
             await self.broadcast({"type": "model", "pixels": self.model.to_json_pixels()})
-            await self.broadcast({"type": "confidence", **self.model.model_confidence()})
+            await self.broadcast({"type": "confidence", **conf_summary})
             await self.broadcast({"type": "next_suggestion",
                                   **suggest_next_angle(self.model, self.model.sessions)})
 
