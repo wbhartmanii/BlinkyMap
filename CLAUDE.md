@@ -298,6 +298,15 @@ Open, in rough priority order:
   been taken.
 - **Legacy one-pixel scan path** still exists server-side (`start_scan`) but
   nothing drives it. Remove once coded scanning is proven on a real prop.
+- **The server is on the legacy `websockets` API** (`WebSocketServerProtocol`,
+  `websockets.serve`), deprecated in 14.0 and destined for removal — issue #30.
+  Not broken: it runs on 17.0.1 with warnings, and the FPP box's apt-provided
+  10.4 predates the deprecation entirely. The trap is that the replacement
+  `websockets.asyncio.server` does not exist in 10.4, so the port is not a
+  straight swap — either FPP needs a newer websockets than apt gives, or the
+  import needs a version shim. That decision is the design; make it first.
+  This is also why dependabot's `>=16.1.1` bump was declined (#28): it would
+  disown the only version the plugin is confirmed against.
 - Extrapolate positions for unseen pixels from neighbours.
 - 2D-only mapping mode option.
 
