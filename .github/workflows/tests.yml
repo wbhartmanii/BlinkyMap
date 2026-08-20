@@ -1,0 +1,46 @@
+name: Tests
+
+# Every branch, not just main. The work happens on claude/* branches and the
+# point is to hear about a break before it is merged, not after.
+on: push
+
+# A branch that gets three pushes in a minute only needs the last one checked.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # numpy/websockets/requests only — the geometry tests import
+      # blinkymap_server, which exits early if websockets is missing.
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      # Runs as a script and exits non-zero itself; pytest would execute its
+      # module-level checks at import time and trip over the sys.exit.
+      - name: Wire-length check (pixel pitch as an upper bound)
+        run: python3 tests/test_pitch_check.py
+
+      # This one IS a pytest file: nine test_* functions and no __main__ block,
+      # so `python3 tests/test_tilt_geometry.py` defines them, runs none, and
+      # exits 0. It has to be invoked through pytest to assert anything.
+      - name: Tilt geometry against synthetic ground truth
+        run: python3 -m pytest tests/test_tilt_geometry.py -q
+
+      - name: tilt.js against the full W3C rotation matrix
+        run: node tests/test_tilt.mjs

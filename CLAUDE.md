@@ -297,12 +297,26 @@ Open, in rough priority order:
 - 2D-only mapping mode option.
 
 ## Tests
-No CI. Run both before trusting a geometry change:
+`.github/workflows/tests.yml` runs all three on every push, to every branch.
+Locally, run them before trusting a geometry change:
 - `python3 -m pytest tests/test_tilt_geometry.py` — the tilt scheme against the
-  shipped `_projection_matrix`, with synthetic ground truth.
+  shipped `_projection_matrix`, with synthetic ground truth. **Must go through
+  pytest.** It is nine `test_*` functions with no `__main__` block, so
+  `python3 tests/test_tilt_geometry.py` defines them, runs none, and exits 0 —
+  a green result that asserted nothing.
 - `node tests/test_tilt.mjs` — `tilt.js` against the full W3C rotation matrix.
 - `python3 tests/test_pitch_check.py` — the wire-length check, including which
-  errors it is blind to by construction.
+  errors it is blind to by construction. This one is a script and exits
+  non-zero itself; under pytest its module-level checks would run at import
+  and trip over the `sys.exit`.
+
+There is no build workflow any more. `build.yml` packaged the PyInstaller
+desktop app (`main.py`, `blinkymap/`, `BlinkyMap.spec`) — superseded by the
+plugin, untouched since May, and never shipped from the README. It also never
+ran once: `shell: ${{ matrix.shell }}` is invalid (that key takes no
+expressions), and a workflow that fails validation never gets its `on:` filters
+evaluated either, so all 115 runs were instant zero-job failures on every
+branch. The desktop code is still in the tree; only the workflow is gone.
 
 ## Testing Checklist
 1. Browse to `https://<fpp-ip>/plugin/blinkymap/` on **both** laptop and phone;
