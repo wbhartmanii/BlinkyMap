@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>BlinkyMap Control</title>
-  <link rel="stylesheet" href="style.css?v=37" />
+  <link rel="stylesheet" href="style.css?v=38" />
 
   <!-- Import map for Three.js (served locally after install.sh) -->
   <script type="importmap">
@@ -83,6 +83,22 @@
     geometry only ever used the difference between the two, which is exactly
     what the tilt gives.
   </p>
+
+  <h2>Prop geometry</h2>
+  <label>Pixel pitch (mm, 0 = unknown)
+    <input id="cfg-pitch" type="number" value="0" min="0" max="2000" step="1" />
+    <span class="slider-hint">Spacing between LEDs measured <em>along the wire</em>.
+      4&Prime;&nbsp;=&nbsp;101.6, 3&Prime;&nbsp;=&nbsp;76.2. Used only as a sanity
+      check: two LEDs can never be further apart in 3D than their pitch, so this
+      catches misplaced pixels and a badly wrong scale. It can never prove the
+      model is too <em>small</em> &mdash; a coiled string is legitimately slack.</span>
+  </label>
+  <label>String breaks (pixel numbers, comma separated)
+    <input id="cfg-breaks" type="text" value="" placeholder="e.g. 25, 61" />
+    <span class="slider-hint">First pixel of each <em>new</em> physical string. The pitch
+      check is skipped across these joins, where consecutive numbers are not
+      wired neighbours. Leave blank for one continuous run.</span>
+  </label>
 
   <h2>Sensor</h2>
   <div id="sensor-status" class="cam-status cam-status-off">No sensor connected</div>
@@ -164,7 +180,7 @@
   </ol>
 </section>
 
-<script type="module" src="control.js?v=37"></script>
+<script type="module" src="control.js?v=38"></script>
 <p class="slider-hint" style="padding:0 1rem 1rem"><a href="./">&larr; change role</a></p>
 </body>
 </html>

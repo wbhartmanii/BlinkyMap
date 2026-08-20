@@ -47,7 +47,7 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import numpy as np
 import requests
@@ -339,6 +339,13 @@ class ControllerConfig:
     # Detection settings: configured on the control UI, applied on the sensor.
     min_conf: float = 0.5
     hfov_deg: float = 60.0
+    # Spacing between LEDs measured ALONG THE WIRE. Zero means "not configured",
+    # which disables every check that depends on it. This is never a known 3D
+    # distance — see _neighbour_chords for what it can and cannot tell us.
+    pitch_m: float = 0.0
+    # 0-based indices where a new physical string starts, so pixel i-1 and i are
+    # not wired neighbours and the pitch bound does not apply across the join.
+    string_breaks: Tuple[int, ...] = ()
 
 
 # ── Camera / session geometry ─────────────────────────────────────────────────
@@ -506,6 +513,122 @@ def _angular_spread(projections: List[Tuple[np.ndarray, SessionConfig]]) -> floa
     return min(max_sep / math.pi, 1.0)
 
 
+def _parse_breaks(raw, pixel_count: int) -> Tuple[int, ...]:
+    """Where one physical string ends and the next begins, as 0-based indices.
+
+    Accepts the control UI's free-text field ("25, 61") or a JSON list. Values
+    are 1-BASED going in, matching the pixel numbers shown everywhere else in
+    the UI and the channel numbering in exports; a "25" means pixel 25 is the
+    first LED of a new string, so 24->25 is not a wired pair.
+
+    Garbage is dropped rather than raising: this is a hint that only ever
+    suppresses checks, so a typo costs a false pitch violation at worst, and
+    rejecting a whole config over one stray character would be worse.
+    """
+    if not raw:
+        return ()
+    items = raw.replace(";", ",").split(",") if isinstance(raw, str) else raw
+    out: Set[int] = set()
+    for item in items:
+        try:
+            n = int(str(item).strip())
+        except (TypeError, ValueError):
+            continue
+        # 1-based in, 0-based out. A break at pixel 1 is meaningless — there is
+        # no preceding pixel for it to detach from.
+        if 1 < n <= pixel_count:
+            out.add(n - 1)
+    return tuple(sorted(out))
+
+
+def _neighbour_chords(
+    results: Dict[int, "PixelResult"],
+    pixel_count: int,
+    pitch_m: float,
+    breaks: Iterable[int] = (),
+) -> Optional[dict]:
+    """Distribution of straight-line distances between wired-adjacent pixels.
+
+    Pitch is measured along the wire, so the chord between consecutive LEDs is
+    only ever **<= pitch** — slack, sag and curvature all shorten it and nothing
+    can lengthen it. That makes this a one-sided test, and the asymmetry is the
+    whole point:
+
+      * A chord longer than pitch is geometrically impossible. Either that pixel
+        is misplaced, or the entire model is scaled wrong.
+      * A chord shorter than pitch proves nothing at all. A coiled string is
+        perfectly entitled to sit at a fraction of its pitch.
+
+    So we never report "the model is too small" — we cannot know that. What we
+    can report is an upper bound on the scale correction. If true = s * model,
+    then s * chord <= pitch for every pair, hence s <= pitch / max(chord). A high
+    percentile stands in for that max so one bad triangulation cannot set the
+    bound (see `robust` below for how the percentile is chosen). `max_scale`
+    below 1 means the model is provably inflated by at least 1/max_scale; above
+    1 it is merely "not ruled out", which is why the UI must never read it as a
+    correction factor to multiply by.
+
+    Immediate neighbours only. Spanning a gap of unseen pixels would give more
+    samples against a looser bound (n pixels apart -> n*pitch), but slack
+    accumulates faster than the bound grows, so those pairs sit lower relative
+    to their limit and would drag the percentile down — making an inflated model
+    look acceptable. Wrong direction for a safety check; not worth the samples.
+    """
+    if pitch_m <= 0 or pixel_count < 2:
+        return None
+
+    break_set = set(breaks)
+    chords: List[float] = []
+    for i in range(1, pixel_count):
+        if i in break_set:
+            continue
+        a, b = results.get(i - 1), results.get(i)
+        if a is None or b is None or a.position is None or b.position is None:
+            continue
+        chords.append(float(np.linalg.norm(a.position - b.position)))
+
+    if not chords:
+        return None
+
+    arr = np.array(chords)
+    n = len(arr)
+
+    # The percentile that sets the scale bound has to discard at least two
+    # chords, because one misplaced pixel corrupts exactly two of them (the pair
+    # before it and the pair after). A fixed p98 does that only once n >= 100 —
+    # on a 24-pixel string it interpolates between the top two samples, so a
+    # single flyer sets the bound and the model reads as 30x inflated. Scaling
+    # the cut to max(2, 2% of n) keeps one bad pixel out of a global verdict
+    # without throwing away 10% of a 500-pixel string.
+    drop = max(2.0, 0.02 * n)
+    pct = max(50.0, 100.0 * (1.0 - drop / n))
+    robust = float(np.percentile(arr, pct))
+
+    # Outliers are not swept up by that — they surface separately in max_mm and
+    # over_pitch. Division of labour: `max_scale` answers "is the whole model
+    # the wrong size", these two answer "is some individual pixel misplaced".
+    #
+    # The tolerance matters. A genuinely taut string sits AT pitch, so its
+    # chords straddle the limit on measurement noise alone and a bare `> pitch`
+    # reports about half of a perfect model as impossible. Only count a chord
+    # that exceeds pitch by more than 5%, which is beyond rounding but well
+    # inside any real scale error.
+    return {
+        "pairs":      n,
+        "pitch_mm":   round(pitch_m * 1000, 1),
+        "median_mm":  round(float(np.median(arr)) * 1000, 1),
+        "p90_mm":     round(float(np.percentile(arr, 90)) * 1000, 1),
+        "robust_mm":  round(robust * 1000, 1),
+        "robust_pct": round(pct, 1),
+        "max_mm":     round(float(arr.max()) * 1000, 1),
+        "over_count": int((arr > pitch_m * 1.05).sum()),
+        "over_pitch": round(float((arr > pitch_m * 1.05).mean()), 3),
+        # Upper bound on the true scale correction; see docstring. Guarded
+        # against a degenerate 0 when every pixel triangulates to one point.
+        "max_scale":  round(pitch_m / robust, 3) if robust > 1e-9 else None,
+    }
+
+
 # ── Model state ───────────────────────────────────────────────────────────────
 
 @dataclass
@@ -542,6 +665,10 @@ class BlinkyModel:
         self.sessions: Dict[int, Tuple[SessionConfig, Dict[int, Detection]]] = {}
         self.results: Dict[int, PixelResult] = {}
         self.pixel_count: int = 0
+        # Pushed in from ControllerConfig alongside pixel_count. Zero pitch
+        # disables the chord check entirely, so existing setups are unaffected.
+        self.pitch_m: float = 0.0
+        self.string_breaks: Tuple[int, ...] = ()
 
     def add_session(self, sess: SessionConfig):
         self.sessions[sess.session_id] = (sess, {})
@@ -624,7 +751,8 @@ class BlinkyModel:
     def model_confidence(self) -> dict:
         if not self.results:
             return {"overall": 0.0, "grade": "Poor", "coverage": 0.0,
-                    "mean_confidence": 0.0, "high": 0, "medium": 0, "low": 0, "unseen": 0}
+                    "mean_confidence": 0.0, "high": 0, "medium": 0, "low": 0,
+                    "unseen": 0, "chords": None}
 
         grades = {"high": 0, "medium": 0, "low": 0, "unseen": 0}
         confs = []
@@ -650,10 +778,55 @@ class BlinkyModel:
         spread = _angular_spread([(None, sc) for sc, _ in self.sessions.values()])
         accuracy = max(0.0, 1.0 - mean_reproj / 20.0)
 
-        if coverage < 0.9:
+        # Wire-length sanity. Deliberately NOT folded into `overall` — see the
+        # note in _neighbour_chords. A pitch violation is not a gradual quality
+        # measure, it is a validity failure: a model inflated 3x is not "40% as
+        # good", it is wrong in a way that no amount of extra scanning fixes.
+        # Blending it into the score would also repeat the peak/255 mistake of
+        # weighting a term before anyone had seen its dynamic range.
+        chords = _neighbour_chords(self.results, self.pixel_count,
+                                   self.pitch_m, self.string_breaks)
+
+        # Ranked first when it fires: if the scale is wrong the geometry is
+        # misread everywhere, including the pixels that look fine.
+        #
+        # The MEDIAN chord breaking pitch is what separates a scale error from a
+        # few bad pixels, and no percentile can do it — on a short string four
+        # corrupted chords survive any robust cut and read as a 30x inflation.
+        # A genuine scale error stretches every chord, so more than half the
+        # string goes impossible at once; scattered triangulation failures leave
+        # the median untouched and surface in over_pitch instead.
+        #
+        # Median alone, with the same 5% tolerance used for over_pitch. Pairing
+        # it with a max_scale threshold only opened a seam: a mild FOV error put
+        # the median clearly over pitch while max_scale sat just inside the gate,
+        # so a global scale fault got reported as scattered bad pixels.
+        scale_broken = bool(
+            chords and chords["pairs"] >= 8
+            and chords["median_mm"] > chords["pitch_mm"] * 1.05
+        )
+
+        # The other half of the pitch signal: chords that break the bound while
+        # the median holds are individual pixels in impossible places, not a
+        # scale problem. Worth its own slot above "accuracy" because it is a
+        # harder fact than reprojection error — a flyer can sit perfectly on
+        # both cameras' rays and still be somewhere its wire cannot reach.
+        #
+        # A count, not a fraction. Pitch is a hard geometric bound and the 5%
+        # magnitude tolerance above has already absorbed the noise, so a single
+        # surviving violation is a real defect worth naming — and on a fraction
+        # it would not be: one unmarked string join on a 24-pixel run is 1 pair
+        # in 23, which any sensible percentage gate rounds away to nothing.
+        impossible = bool(chords and chords["over_count"] >= 1)
+
+        if scale_broken:
+            limiting = "scale"
+        elif coverage < 0.9:
             limiting = "coverage"
         elif spread < 0.5:
             limiting = "spread"
+        elif impossible:
+            limiting = "impossible"
         elif accuracy < 0.5:
             limiting = "accuracy"
         else:
@@ -678,6 +851,7 @@ class BlinkyModel:
             "consensus_px": round(median_consensus, 1),
             "limiting": limiting,
             "sessions": len(self.sessions),
+            "chords": chords,
             **grades,
         }
 
@@ -1164,7 +1338,15 @@ class BlinkyServer:
             self.config.output_mode       = msg.get("output_mode", self.config.output_mode)
             self.config.min_conf          = float(msg.get("min_conf", self.config.min_conf))
             self.config.hfov_deg          = float(msg.get("hfov_deg", self.config.hfov_deg))
+            # Pitch arrives in mm — strings are sold as "100mm" or 4" (101.6mm),
+            # and metres would put the only interesting digits after the decimal
+            # point. Not routed through the UI's m/ft toggle for that reason.
+            self.config.pitch_m           = max(0.0, float(msg.get("pitch_mm", 0.0))) / 1000.0
+            self.config.string_breaks     = _parse_breaks(msg.get("string_breaks"),
+                                                          self.config.pixel_count)
             self.model.pixel_count        = self.config.pixel_count
+            self.model.pitch_m            = self.config.pitch_m
+            self.model.string_breaks      = self.config.string_breaks
             await self.broadcast(self._sensor_config(), role="sensor")
             await ws.send(json.dumps({"type": "status", "message": "Config saved"}))
             asyncio.create_task(self._probe_controller(ws))
@@ -1521,6 +1703,13 @@ class BlinkyServer:
                      sess.session_id, conf_summary["sessions"],
                      conf_summary["reproj_px"], conf_summary["consensus_px"],
                      conf_summary["limiting"])
+            ch = conf_summary.get("chords")
+            if ch:
+                log.info("chords: %d pairs, pitch %.1fmm, median %.1f p90 %.1f "
+                         "p%.0f %.1f max %.1f, %.0f%% over pitch, max_scale %s",
+                         ch["pairs"], ch["pitch_mm"], ch["median_mm"], ch["p90_mm"],
+                         ch["robust_pct"], ch["robust_mm"], ch["max_mm"],
+                         ch["over_pitch"] * 100, ch["max_scale"])
             await self.broadcast({"type": "model", "pixels": self.model.to_json_pixels()})
             await self.broadcast({"type": "confidence", **conf_summary})
             await self.broadcast({"type": "next_suggestion",

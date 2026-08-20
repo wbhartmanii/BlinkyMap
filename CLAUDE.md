@@ -106,7 +106,7 @@ into a single base-3 code with centroids accumulated by code.
   `max-age=31536000, immutable`. That is fine for query-versioned JS and CSS,
   but a cached HTML page keeps requesting an old `?v=` forever — hours were lost
   re-testing code that had already been replaced. The installer sets `no-store`
-  on `*.html`. The sensor header also shows a build tag (`v30`); if it does not
+  on `*.html`. The sensor header also shows a build tag (`v38`); if it does not
   match what was deployed, nothing else matters.
 - **Asset cache busting** via `?v=N` on CSS/JS. Increment on every deploy.
 - **WebSocket proxy** through Apache at `/blinkymap-ws → ws://127.0.0.1:8765`
@@ -134,9 +134,63 @@ Measured on real four-position scans of the same prop:
 - **A pile of lights is a pathological test case.** Mutual illumination and
   occlusion dominate everything else. Spread the prop out before drawing
   conclusions about accuracy.
-- **Pixel pitch is NOT a known distance.** Pitch is measured along the wire; the
-  straight-line 3D distance between consecutive LEDs is only ever ≤ pitch, and
-  varies by model. Never use it as ground truth or to calibrate FOV.
+- **Pixel pitch is NOT a known distance — it is an upper bound.** Pitch is
+  measured along the wire; the straight-line 3D distance between consecutive
+  LEDs is only ever ≤ pitch, and varies by model. Never use it as ground truth,
+  and never fit FOV by assuming chord = pitch. As an *inequality* it is sound
+  and now checked: see "Wire-length check" below.
+
+## Wire-length check (pitch as an upper bound)
+Set "Pixel pitch" on the Control tab (mm; 0 disables everything here) and the
+server measures the distance between every pair of wired-adjacent triangulated
+pixels. Two facts make this worth having:
+
+- **It is one-sided, and only one side is informative.** A chord longer than
+  pitch is geometrically impossible. A chord shorter than pitch proves nothing —
+  a coiled string is legitimately slack. So the check reports "at least Nx too
+  big" and can never report "too small". Roughly half the error space is
+  invisible to it; measured in `tests/test_pitch_check.py`, overstating FOV or
+  distance shrinks the model and goes entirely unflagged.
+- **It separates causes that reprojection error conflates.** Elevated
+  reprojection says "something is wrong" without saying what; noisy detections
+  and a wrong FOV both raise it. Only a scale error inflates the neighbour gaps,
+  so pitch tells the two apart. Simulated against the shipped tilt-based
+  projection (`tests/test_pitch_check.py`), assuming 60° FOV on a taut 100mm
+  string gives:
+
+  | true FOV | consensus reproj | median gap | verdict |
+  |---|---|---|---|
+  | 60° | 0px | 100mm | clean |
+  | 50° | 23px | 114mm | scale |
+  | 45° | 41px | 123mm | scale |
+  | 40° | 67px | 132mm | scale |
+
+  Note the **45-60px band matches real four-position scans**, which makes an
+  overstated FOV a live hypothesis for the open issue below rather than a
+  theoretical one. Run a real scan with pitch set: if the median gap comes back
+  clean, FOV is exonerated and the error is detection noise; if it comes back
+  inflated, the table says roughly by how much.
+
+Two distinct verdicts, and conflating them was the main design trap:
+`limiting="scale"` needs the **median** chord over pitch (a global fault — every
+chord stretches), while `limiting="impossible"` is any individual violation (bad
+pixels, or an unmarked string join). A robust percentile alone cannot tell these
+apart: on a 24-pixel string, two flyers corrupt four chords and read as a 30x
+inflation.
+
+Set **String breaks** to the first pixel number of each new physical string, or
+every join reads as an impossible jump.
+
+**Naming collision, and it is genuinely confusing:** `pitch` means *camera tilt*
+in the session/tilt code (`sess.pitch_deg`, `grep "above aim point"`) and *LED
+spacing* here (`config.pitch_m`, `pitch_mm`). They are unrelated. The `_m`/`_mm`
+suffix marks the wire one; `_deg` marks the camera one.
+
+Deliberately **not folded into the confidence score.** A model inflated 3x is not
+"40% as good" — it is a different kind of wrong, and no amount of extra scanning
+moves it. Weighting it into `overall` before anyone has seen its dynamic range on
+real hardware would also repeat the `peak/255` mistake. It surfaces as a limiting
+factor and beside the score, not inside it.
 
 ## Reprojection error — history on the same prop
 Useful for judging whether a change actually helped. Consensus metric (median
@@ -216,7 +270,13 @@ Open, in rough priority order:
   camera model is the remaining suspect: lens distortion is unmodelled, and the
   best-fit FOV (~40-70°, weakly constrained) does not clearly match the
   configured value. A one-time per-device calibration would settle it — no
-  browser API exposes the true FOV, and pitch cannot be used to derive it.
+  browser API exposes the true FOV. Pixel pitch cannot *derive* FOV (chord ≠
+  pitch), but the wire-length check bounds the scale from one side, and unlike
+  reprojection error it distinguishes an FOV error from detection noise. The
+  simulated table under "Wire-length check" maps FOV error to both figures, and
+  the observed 45-60px sits where a 40-45° true FOV would put it. **Set a pitch
+  and take one real scan before chasing anything else here** — it either
+  exonerates FOV or sizes the error.
 - ~~**Camera tilt is unmodelled.**~~ Done, but note *how*. The earlier attempt
   that made things worse bolted a measured rotation ON TOP of a look-at built
   from a typed position — double-counting the tilt and destroying the
@@ -237,14 +297,18 @@ No CI. Run both before trusting a geometry change:
 - `python3 -m pytest tests/test_tilt_geometry.py` — the tilt scheme against the
   shipped `_projection_matrix`, with synthetic ground truth.
 - `node tests/test_tilt.mjs` — `tilt.js` against the full W3C rotation matrix.
+- `python3 tests/test_pitch_check.py` — the wire-length check, including which
+  errors it is blind to by construction.
 
 ## Testing Checklist
 1. Browse to `https://<fpp-ip>/plugin/blinkymap/` on **both** laptop and phone;
    accept the self-signed cert on each and pick a role.
 2. **Confirm the build tag** in the sensor header matches what was deployed. If
    it does not, stop — you are testing stale code.
-3. Control tab: FPP IP, start channel, pixel count, detection settings → Save &
-   Connect. Watch for "Sensor connected". There is no height field any more.
+3. Control tab: FPP IP, start channel, pixel count, **pixel pitch** (and string
+   breaks, if the run is more than one physical string), detection settings →
+   Save & Connect. Watch for "Sensor connected". There is no height field any
+   more.
 4. Phone: ⚙ → Open Camera → **Enable Sensors** → Set 0° here. Setup collapses
    once all three are done. Confirm the "Aim" readout shows a tilt angle and a
    derived height — if it says "manual", the accelerometer was refused and a
@@ -268,4 +332,6 @@ Quick server-side checks:
   back to a typed height and the measurement never arrived.
 - `grep "Model after session" /tmp/blinkymap_server.log` — consensus and
   pairwise reprojection after each scan.
+- `grep chords /tmp/blinkymap_server.log` — neighbour-gap distribution vs pitch.
+- `python3 tests/test_pitch_check.py` — wire-length check, no hardware needed.
 - `curl -s http://<fpp-ip>/api/testmode` — confirms what FPP is driving.

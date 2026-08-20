@@ -28,6 +28,8 @@ const cfgPixels      = document.getElementById("cfg-pixels");
 const cfgDelay       = document.getElementById("cfg-delay");
 const cfgFov         = document.getElementById("cfg-fov");
 const cfgMinConf     = document.getElementById("cfg-min-conf");
+const cfgPitch       = document.getElementById("cfg-pitch");
+const cfgBreaks      = document.getElementById("cfg-breaks");
 const cfgMinConfVal  = document.getElementById("cfg-min-conf-val");
 const btnSaveConfig      = document.getElementById("btn-save-config");
 const controllerStatus   = document.getElementById("controller-status");
@@ -229,6 +231,10 @@ function sendConfig() {
     // Owned here, relayed by the server to the sensor that actually detects.
     min_conf:    parseInt(cfgMinConf.value) / 100,
     hfov_deg:    parseFloat(cfgFov.value),
+    // Pitch stays in mm and does NOT go through toMeters — strings are sold in
+    // mm or inches, and the m/ft toggle would render a 4" pitch as "0.33 ft".
+    pitch_mm:      parseFloat(cfgPitch.value) || 0,
+    string_breaks: cfgBreaks.value.trim(),
   });
 }
 
@@ -410,10 +416,19 @@ function updateConfidence(msg) {
   const reproj = msg.consensus_px !== undefined
     ? ` · Reproj ${msg.consensus_px}px (${msg.reproj_px}px pairwise)`
     : "";
-  confidenceDet.textContent =
+  let det =
     `Coverage ${Math.round((msg.coverage ?? 0)*100)}% · ` +
     `High ${msg.high ?? 0} · Med ${msg.medium ?? 0} · Low ${msg.low ?? 0} · ` +
     `Unseen ${msg.unseen ?? 0}${reproj}`;
+  // Wire-length check, shown only when a pitch was configured. Reported beside
+  // the score rather than folded into it — an impossible model is not a
+  // low-scoring model, it is a different kind of wrong.
+  const ch = msg.chords;
+  if (ch) {
+    det += ` · Neighbour gap ${ch.median_mm}mm median / ${ch.pitch_mm}mm pitch`;
+    if (ch.over_count > 0) det += ` · ${ch.over_count} impossible`;
+  }
+  confidenceDet.textContent = det;
 
   // Contextual tip
   const nSess = sessions.length;
@@ -422,6 +437,19 @@ function updateConfidence(msg) {
     tip = "Complete your first scan to start building the model.";
   } else if (nSess === 1) {
     tip = "Scan from a second angle (~180° away) to enable 3D triangulation — positions can't be calculated from one view alone.";
+  } else if (msg.limiting === "scale") {
+    // Ahead of the score-based branches on purpose. A mis-scaled model usually
+    // scores low too, and the low-score advice ("try more angles") is actively
+    // wrong here — no number of extra scans fixes a wrong scale, and the
+    // operator would keep collecting data against a broken model.
+    // max_scale is an upper bound, not a correction factor: it says the model
+    // is at least this much too big, never that it is too small.
+    const times = ch?.max_scale ? (1 / ch.max_scale).toFixed(1) : "?";
+    tip = `Impossible geometry: the median gap between neighbouring pixels is ` +
+          `${ch?.median_mm}mm on a ${ch?.pitch_mm}mm string, so the model is at ` +
+          `least ${times}x too big. Two LEDs cannot be further apart than their ` +
+          `pitch. Check the distance you entered for each position, and the ` +
+          `horizontal FOV — both scale the whole reconstruction.`;
   } else if (pct < 20) {
     tip = `Only ${msg.high + msg.medium} pixels triangulated so far. Try more angles or lower the detection confidence threshold.`;
   } else if ((msg.unseen ?? 0) > (msg.high + msg.medium + msg.low)) {
@@ -439,6 +467,14 @@ function updateConfidence(msg) {
         tip = `Your scan positions are too close together (spread ` +
               `${Math.round((msg.spread ?? 0) * 180)}° of a possible 180°). ` +
               `Move further around the model — roughly 90° apart.`;
+        break;
+      case "impossible":
+        tip = `${ch?.over_count} of ${ch?.pairs} neighbouring pairs sit further apart ` +
+              `than the ${ch?.pitch_mm}mm pitch allows (worst ${ch?.max_mm}mm), while ` +
+              `the rest of the string looks right. That is ` +
+              `individual pixels landing in the wrong place, not a scale problem — ` +
+              `scan those from another angle. If the string is actually several ` +
+              `strings, set the breaks so the joins are not checked.`;
         break;
       case "accuracy":
         tip = `Coverage and angle spread are already maxed, so more scans will not ` +
