@@ -18,18 +18,14 @@ jobs:
         include:
           - os: windows-latest
             artifact: BlinkyMap-Windows.zip
-            zip_cmd: Compress-Archive -Path dist/BlinkyMap -DestinationPath BlinkyMap-Windows.zip
-            shell: pwsh
 
           - os: macos-latest
             artifact: BlinkyMap-Mac.zip
             zip_cmd: cd dist && zip -r ../BlinkyMap-Mac.zip BlinkyMap.app
-            shell: bash
 
           - os: ubuntu-latest
             artifact: BlinkyMap-Linux.zip
             zip_cmd: cd dist && zip -r ../BlinkyMap-Linux.zip BlinkyMap
-            shell: bash
 
     runs-on: ${{ matrix.os }}
 
@@ -69,9 +65,20 @@ jobs:
         run: pyinstaller BlinkyMap.spec --noconfirm
 
       # ── zip ───────────────────────────────────────────────────────────────────
-      - name: Create zip
+      # `shell:` accepts no expressions — no context is available there, so
+      # `shell: ${{ matrix.shell }}` made the whole file fail GitHub's schema
+      # check. A workflow that fails to validate cannot have its `on:` filters
+      # evaluated either, so every push to every branch created a run that died
+      # instantly with no jobs. Two guarded steps, one per shell, instead.
+      - name: Create zip (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path dist/BlinkyMap -DestinationPath BlinkyMap-Windows.zip
+        shell: pwsh
+
+      - name: Create zip (macOS / Linux)
+        if: runner.os != 'Windows'
         run: ${{ matrix.zip_cmd }}
-        shell: ${{ matrix.shell }}
+        shell: bash
 
       # ── upload artifact (always) ──────────────────────────────────────────────
       - name: Upload build artifact
