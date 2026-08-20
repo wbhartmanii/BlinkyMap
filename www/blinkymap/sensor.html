@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>BlinkyMap Sensor</title>
-  <link rel="stylesheet" href="style.css?v=33" />
+  <link rel="stylesheet" href="style.css?v=34" />
 </head>
 <body class="sensor-body">
 
@@ -23,8 +23,8 @@
   <span id="hud-angle-label">around model</span>
   <span class="spacer"></span>
   <div id="unit-toggle">
-    <button class="unit-btn active" data-unit="m">m</button>
-    <button class="unit-btn" data-unit="ft">ft</button>
+    <button class="unit-btn" data-unit="m">m</button>
+    <button class="unit-btn active" data-unit="ft">ft</button>
   </div>
   <button id="btn-setup-toggle" title="Setup">&#9881;</button>
   <span id="build-tag"></span>
@@ -82,15 +82,15 @@
 <!-- Working controls: always visible, thumb-reachable -->
 <div id="controls">
   <div class="field-row">
-    <label class="inline-field">Dist&nbsp;<span class="unit-sfx">m</span>
-      <input id="sess-dist" type="number" value="2.0" min="0.5" max="20" step="0.5" />
+    <label class="inline-field">Dist&nbsp;<span class="unit-sfx">ft</span>
+      <input id="sess-dist" type="number" value="6.5" min="1" max="65" step="0.5" />
     </label>
     <div id="tilt-readout" class="inline-field tilt-readout" style="display:none">
       <span class="tilt-label">Aim</span>
       <span id="tilt-value">&mdash;</span>
     </div>
-    <label class="inline-field" id="manual-height-field">High&nbsp;<span class="unit-sfx">m</span>
-      <input id="sess-height" type="number" value="1.5" min="0.2" max="10" step="0.1" />
+    <label class="inline-field" id="manual-height-field">High&nbsp;<span class="unit-sfx">ft</span>
+      <input id="sess-height" type="number" value="5" min="0.5" max="33" step="0.5" />
     </label>
   </div>
 
@@ -117,6 +117,6 @@
 <span id="compass-angle" style="display:none"></span>
 <span id="compass-sub" style="display:none"></span>
 
-<script type="module" src="sensor.js?v=33"></script>
+<script type="module" src="sensor.js?v=34"></script>
 </body>
 </html>

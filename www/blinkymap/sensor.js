@@ -15,7 +15,7 @@ import { Compass, angleDelta } from "./compass.js";
 import { CodedScan } from "./coded.js";
 import { Tilt, heightAboveAim, MAX_PITCH_DEG } from "./tilt.js";
 
-export const BUILD = "v33";
+export const BUILD = "v34";
 
 // Peak-to-peak movement across a capture, beyond which the pose recorded for
 // the session no longer describes all of its frames. Pitch comes from the
@@ -72,7 +72,7 @@ const unitToggle = $("unit-toggle");
 let ws = null;
 let bgImageData = null;
 let camWidth = 1280, camHeight = 720;
-let units = "m";
+let units = "ft";
 let scanning = false;
 let minConf = 0.5;          // relayed from the control UI via sensor_config
 let hfovDeg = 60;           // ditto

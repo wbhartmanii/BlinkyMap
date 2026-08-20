@@ -65,7 +65,7 @@ let currentPixelIdx = -1;
 let sessions        = [];
 let latestPixels    = [];
 let lastSuggestion  = null;
-let units           = "m";   // "m" or "ft"
+let units           = "ft";  // "m" or "ft"
 
 // ── Unit helpers ──────────────────────────────────────────────────────────────
 // Form fields hold values in the CURRENTLY SELECTED display units, never

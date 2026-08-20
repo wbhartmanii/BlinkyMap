@@ -155,6 +155,10 @@ class E131Output:
     def all_off(self):
         self._send_raw(bytes(self._buf_len))
 
+    def release(self):
+        """Drop the socket but leave the pixels lit; see FPPOutput.release."""
+        self._sock.close()
+
     def close(self):
         self.all_off()
         self._sock.close()
@@ -213,6 +217,15 @@ class FPPOutput:
             "multisyncHosts": "",
             "args": [],
         }, timeout=3)
+
+    def release(self):
+        """Drop the HTTP session but leave the pixels as they are.
+
+        `close()` darkens the string, which is right at the end of a scan and
+        wrong for the framing light: it would extinguish the very thing it was
+        just asked to light.
+        """
+        self._sess.close()
 
     def close(self):
         self.all_off()
@@ -1317,8 +1330,10 @@ class BlinkyServer:
         except Exception as e:
             log.warning("Aim light: %s", e)
         finally:
+            # release(), not close(): close() turns everything off, which would
+            # undo the light we were just asked to switch on.
             try:
-                await loop.run_in_executor(None, output.close)
+                await loop.run_in_executor(None, output.release)
             except Exception:
                 pass
 
