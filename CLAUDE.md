@@ -256,9 +256,14 @@ Verified against FPP 9.5.3 on 2026-08-17.
   pixel 1 = ch 4–6, pixel 23 = ch 70–72.
 
 ## Development Branch
-Work happens on a `claude/*` branch, then merges to `main`. `pluginInfo.json`
-pins `branch: "main"`, so anything the FPP Plugin Manager installs comes from
-`main` — merge before expecting a fresh install to pick a change up.
+**Work directly on `main`.** One person develops this, from several machines,
+so feature branches only add merge steps and confusion between locations —
+pull, commit, push. `.github/workflows/tests.yml` runs on every push, so a
+break is caught on `main` rather than hidden on a branch nobody revisits.
+
+`pluginInfo.json` pins `branch: "main"`, so what the FPP Plugin Manager
+installs is whatever `main` holds — there is no separate "release" step, and a
+pushed mistake is live on the next fresh install.
 
 BlinkyMap is **not** in FPP's official `pluginList.json`, so it does not appear
 in the Plugin Manager UI. Install by cloning into `/home/fpp/media/plugins/blinkymap`
