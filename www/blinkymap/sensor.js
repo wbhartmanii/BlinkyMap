@@ -15,7 +15,7 @@ import { Compass, angleDelta } from "./compass.js";
 import { CodedScan } from "./coded.js";
 import { Tilt, heightAboveAim, MAX_PITCH_DEG } from "./tilt.js";
 
-export const BUILD = "v31";
+export const BUILD = "v32";
 
 // Peak-to-peak movement across a capture, beyond which the pose recorded for
 // the session no longer describes all of its frames. Pitch comes from the

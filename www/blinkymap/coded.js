@@ -99,7 +99,7 @@ export class CodedScan {
    *                           than forming one blob, as a fraction of frame
    * @returns {{found: Object, misses: Object}}
    */
-  resolve(words, minArea = 6, maxSpread = 0.06) {
+  resolve(words, minArea = 6, maxSpread = 0.06, edgeFrac = 0.02) {
     const stats = this._accumulate();
     const found = {}, misses = {};
     const diag = Math.hypot(this.w, this.h);
@@ -118,6 +118,19 @@ export class CodedScan {
         continue;
       }
       const cx = sx / count, cy = sy / count;
+      // A blob touching the frame border is clipped, so its centroid is pulled
+      // inward and no longer marks the LED. Worse, stray light entering at the
+      // edge can satisfy a code by coincidence: one such reading at v=7, with
+      // 0.94 confidence, stretched a real reconstruction's height from 67cm to
+      // 95cm on its own. Whether real-but-clipped or spurious, an edge reading
+      // cannot be trusted, and a pixel at the very edge of view is one the
+      // operator should capture from a better position anyway.
+      const margin = Math.max(6, Math.round(Math.min(this.w, this.h) * edgeFrac));
+      if (cx < margin || cy < margin ||
+          cx > this.w - margin || cy > this.h - margin) {
+        misses[key] = `at the frame edge (${Math.round(cx)},${Math.round(cy)}) — reframe`;
+        continue;
+      }
       // Scatter check: a genuine pixel is one compact blob. A code satisfied by
       // unrelated specks dotted around the frame is noise that happened to line
       // up, and its centroid would be meaningless.
