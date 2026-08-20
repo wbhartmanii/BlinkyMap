@@ -15,7 +15,7 @@ import { Compass, angleDelta } from "./compass.js";
 import { CodedScan } from "./coded.js";
 import { Tilt, heightAboveAim, MAX_PITCH_DEG } from "./tilt.js";
 
-export const BUILD = "v34";
+export const BUILD = "v35";
 
 // Peak-to-peak movement across a capture, beyond which the pose recorded for
 // the session no longer describes all of its frames. Pitch comes from the
@@ -84,6 +84,7 @@ let headingRef = null;      // as reported back by the server
 let liveAngle = null;
 let targetAngle = null;   // suggested next position, from the server
 let suggestReason = "";
+let targetDist = null;   // suggested distance, metres
 let lastScan = null;
 let aimLightOn = false;
 let coded = null;         // active CodedScan
@@ -105,7 +106,8 @@ function maybeCollapseSetup() {
 }
 
 // ── Units ─────────────────────────────────────────────────────────────────────
-function toMeters(v) { return units === "ft" ? v / 3.28084 : v; }
+function toMeters(v)   { return units === "ft" ? v / 3.28084 : v; }
+function fromMeters(m) { return units === "ft" ? m * 3.28084 : m; }
 
 unitToggle.addEventListener("click", (e) => {
   const btn = e.target.closest(".unit-btn");
@@ -280,6 +282,7 @@ async function onMessage(msg) {
 
     case "next_suggestion":
       targetAngle = msg.angle ?? null;
+      targetDist  = msg.distance ?? null;
       suggestReason = msg.reason || "";
       renderCompass();
       showNextStep();
@@ -606,9 +609,23 @@ function showNextStep() {
       ? " — you are there, scan again"
       : ` — walk ${Math.abs(Math.round(d))}° ${d > 0 ? "clockwise" : "counter-clockwise"}`;
   }
+  // Distance advice, but only when it is worth acting on. A prop filling a
+  // sliver of frame wastes the sensor and magnifies every error in 3D; nobody
+  // should be sent trudging back and forth over a few inches.
+  let distAdvice = "";
+  if (targetDist !== null) {
+    const cur = toMeters(parseFloat(sessDist.value) || 0);
+    if (cur > 0 && Math.abs(targetDist - cur) / cur > 0.2) {
+      distAdvice = `<br>${targetDist < cur ? "Move closer" : "Back up"} to ` +
+                   `<strong>${fromMeters(targetDist).toFixed(1)} ${units}</strong> — ` +
+                   `${targetDist < cur ? "the prop is small in frame"
+                                       : "the prop overfills the frame"}`;
+    }
+  }
   lastResult.className = drift ? "cam-status drift-warn" : "cam-status next-step";
   lastResult.innerHTML =
-    driftLine + `${got}<br><strong>Next: move to ${Math.round(targetAngle)}°</strong>${move}`;
+    driftLine + `${got}<br><strong>Next: move to ${Math.round(targetAngle)}°</strong>` +
+    `${move}${distAdvice}`;
 }
 
 /**

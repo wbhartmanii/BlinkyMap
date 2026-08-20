@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>BlinkyMap</title>
-  <link rel="stylesheet" href="style.css?v=34" />
+  <link rel="stylesheet" href="style.css?v=35" />
 </head>
 <body>
 
@@ -22,7 +22,7 @@
     compass around the prop. Open one of each.
   </p>
 
-  <a class="role-card" href="control.html?v=34" id="role-control">
+  <a class="role-card" href="control.html?v=35" id="role-control">
     <div class="role-icon">&#128421;</div>
     <div class="role-body">
       <div class="role-title">Control</div>
@@ -33,7 +33,7 @@
     </div>
   </a>
 
-  <a class="role-card" href="sensor.html?v=34" id="role-sensor">
+  <a class="role-card" href="sensor.html?v=35" id="role-sensor">
     <div class="role-icon">&#128241;</div>
     <div class="role-body">
       <div class="role-title">Sensor</div>
@@ -52,7 +52,7 @@
   const params = new URLSearchParams(location.search);
   const saved  = localStorage.getItem("blinkymap-role");
   if (saved && !params.has("pick")) {
-    location.replace(saved === "sensor" ? "sensor.html?v=34" : "control.html?v=34");
+    location.replace(saved === "sensor" ? "sensor.html?v=35" : "control.html?v=35");
   }
   for (const [id, role] of [["role-control", "control"], ["role-sensor", "sensor"]]) {
     document.getElementById(id).addEventListener("click", () => {

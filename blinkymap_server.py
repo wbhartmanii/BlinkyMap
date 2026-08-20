@@ -767,6 +767,56 @@ def _angular_dist(a: float, b: float) -> float:
     return diff if diff <= 180.0 else 360.0 - diff
 
 
+# How much of the frame the prop should fill. Well short of the edges, because
+# a reading that touches the border is discarded, and a prop that only fills a
+# fifth of the frame wastes most of the sensor's resolution on empty room.
+TARGET_FRAME_FILL = 0.55
+
+
+def _suggest_distance(sessions: Dict, existing_distances: List[float]) -> float:
+    """Recommend a distance from how much of the frame the prop actually filled.
+
+    Apparent size scales as 1/distance, so `fill x distance` is a
+    distance-invariant measure of the prop's real extent. Taking the largest
+    across sessions uses the view that saw most of the prop — a scan from a
+    poor angle sees a sliver and would otherwise argue for standing absurdly
+    close.
+
+    A real scan filled 12-18% of frame at 3ft, which throws away most of the
+    sensor and leaves every detection error magnified in 3D.
+    """
+    if not existing_distances:
+        return 2.0
+    median_d = float(np.median(existing_distances))
+
+    extents = []
+    for sc, dets in sessions.values():
+        if len(dets) < 2:
+            continue
+        xs = np.array([d.cx for d in dets.values()])
+        ys = np.array([d.cy for d in dets.values()])
+        w = sc.img_width or 1
+        h = sc.img_height or 1
+        # 5th-95th percentile, not min-max: one stray reading would otherwise
+        # set the whole extent. A real scan had a single spurious detection at
+        # the top of frame that made a prop filling 18% look like 54%, which
+        # would have advised staying put when moving closer was the right call.
+        span_x = float(np.percentile(xs, 95) - np.percentile(xs, 5))
+        span_y = float(np.percentile(ys, 95) - np.percentile(ys, 5))
+        fill = max(span_x / w, span_y / h)
+        if fill > 0.005:
+            extents.append(fill * sc.distance_m)
+    if not extents:
+        return median_d
+
+    # size / target_fill = the distance at which it fills the frame properly
+    want = max(extents) / TARGET_FRAME_FILL
+    # Never recommend a move so large it is obviously a measurement artefact,
+    # and never closer than arm's length.
+    want = max(0.3, min(want, median_d * 3.0))
+    return round(want, 2)
+
+
 def suggest_next_angle(model: BlinkyModel, sessions: Dict) -> dict:
     """
     Score every 5° candidate angle and recommend the best next camera position.
@@ -783,7 +833,7 @@ def suggest_next_angle(model: BlinkyModel, sessions: Dict) -> dict:
                 for _, (sc, _) in sessions.items()]
     existing_angles   = [a for a, _ in existing]
     existing_distances = [d for _, d in existing]
-    suggested_distance = float(np.median(existing_distances)) if existing_distances else 2.0
+    suggested_distance = _suggest_distance(sessions, existing_distances)
 
     # ── Trivial cases ─────────────────────────────────────────────────────────
     if not existing_angles:
