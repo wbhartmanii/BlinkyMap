@@ -324,6 +324,10 @@ evaluated either, so all 115 runs were instant zero-job failures on every
 branch. The desktop code is still in the tree; only the workflow is gone.
 
 ## Testing Checklist
+0. **Confirm the string lights at all before blaming the plugin.** FPP UI →
+   Status/Control → Test, pick the string's channel range, RGB Single Color. If
+   nothing lights there it is wiring or channel config, not BlinkyMap. This cost
+   a whole session once and it turned out to be a bad pigtail.
 1. Browse to `https://<fpp-ip>/plugin/blinkymap/` on **both** laptop and phone;
    accept the self-signed cert on each and pick a role.
 2. **Confirm the build tag** in the sensor header matches what was deployed. If
