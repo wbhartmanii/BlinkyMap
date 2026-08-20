@@ -970,7 +970,13 @@ class BlinkyServer:
         self._bg_ready: asyncio.Event = asyncio.Event()
 
         # Coded-scan handshakes: one per captured frame, then the batch result.
+        # The ack carries the frame index and only satisfies the wait for THAT
+        # frame. With a bare event, an ack arriving late for frame 2 released
+        # the wait for frame 3, and every subsequent frame was released early by
+        # the previous one's straggler — the string visibly raced through the
+        # remaining patterns while the sensor captured almost none of them.
         self._frame_captured: asyncio.Event = asyncio.Event()
+        self._awaiting_frame: Optional[int] = None
         self._coded_results: asyncio.Queue = asyncio.Queue()
 
         # Whole prop lit white between scans so the operator can frame it.
@@ -1117,7 +1123,12 @@ class BlinkyServer:
             await self._set_aim_light(self.aim_light_pref)
 
         elif t == "coded_frame_captured":
-            self._frame_captured.set()
+            idx = msg.get("index")
+            if self._awaiting_frame is not None and idx == self._awaiting_frame:
+                self._frame_captured.set()
+            else:
+                log.debug("Ignoring ack for frame %s while awaiting %s",
+                          idx, self._awaiting_frame)
 
         elif t == "coded_detections":
             if self.clients.get(ws) == "control":
@@ -1428,12 +1439,16 @@ class BlinkyServer:
             # region can produce a valid-looking code.
             await loop.run_in_executor(None, output.all_off)
             await asyncio.sleep(max(cfg.inter_pixel_delay, 0.25))
+            self._awaiting_frame = -1
             self._frame_captured.clear()
             await self.broadcast({"type": "coded_dark"})
             try:
-                await asyncio.wait_for(self._frame_captured.wait(), timeout=10.0)
+                # Short: the mask is an optimisation, and a sensor that cannot
+                # supply one must not hold the prop dark while the operator
+                # waits wondering whether the scan has hung.
+                await asyncio.wait_for(self._frame_captured.wait(), timeout=3.0)
             except asyncio.TimeoutError:
-                log.warning("No dark-frame ack within 10s — scanning without a mask")
+                log.warning("No dark-frame ack in 3s — scanning without a mask")
 
             for f in range(digits):
                 pattern = coded_frame_pattern(total, f, digits)
@@ -1447,6 +1462,7 @@ class BlinkyServer:
                 # only resolves when every digit matches, one dropped ack
                 # silently voids the entire scan.
                 for attempt in (1, 2):
+                    self._awaiting_frame = f
                     self._frame_captured.clear()
                     t0 = time.time()
                     await self.broadcast({"type": "coded_frame",
@@ -1459,6 +1475,7 @@ class BlinkyServer:
                         log.warning("Frame %d: no ack in 6s (attempt %d)", f, attempt)
                 await self.broadcast({"type": "progress", "index": f, "total": digits})
 
+            self._awaiting_frame = None
             await loop.run_in_executor(None, output.all_off)
 
             # The sensor now does the intersection work and returns everything.
