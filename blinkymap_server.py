@@ -910,6 +910,12 @@ class BlinkyServer:
         self._frame_captured: asyncio.Event = asyncio.Event()
         self._coded_results: asyncio.Queue = asyncio.Queue()
 
+        # Whole prop lit white between scans so the operator can frame it.
+        # `pref` is what the operator asked for and survives a scan; `on` is the
+        # physical state, which a scan necessarily clears.
+        self.aim_light_pref: bool = False
+        self.aim_light_on: bool = False
+
     async def broadcast(self, msg: dict, role: Optional[str] = None):
         targets = [c for c, r in self.clients.items() if role is None or r == role]
         if targets:
@@ -1040,6 +1046,12 @@ class BlinkyServer:
 
         elif t == "background_ready":
             self._bg_ready.set()
+
+        elif t == "aim_light":
+            if self.clients.get(ws) == "control":
+                return
+            self.aim_light_pref = bool(msg.get("on"))
+            await self._set_aim_light(self.aim_light_pref)
 
         elif t == "coded_frame_captured":
             self._frame_captured.set()
@@ -1275,6 +1287,41 @@ class BlinkyServer:
                 "type": "controller_status", "ok": False, "message": f"Error: {e}",
             }))
 
+    async def _set_aim_light(self, on: bool):
+        """Light the whole prop white so the operator can frame it.
+
+        Scans run in the dark, so without this the operator aims at a prop they
+        cannot see and only discovers the framing once the scan is under way.
+        A real scan lost pixels off the top of frame that way, and one clipped
+        reading at the frame edge distorted the reconstruction badly.
+
+        Deliberately not a scan colour: white at full intensity is unmistakable
+        through a viewfinder and cannot be confused with a coded frame.
+        """
+        loop = asyncio.get_running_loop()
+        cfg = self.config
+        try:
+            output = await loop.run_in_executor(None, lambda: _make_output(cfg))
+        except Exception as e:
+            log.warning("Aim light: could not open output: %s", e)
+            return
+        try:
+            if on:
+                pattern = "FFFFFF" * cfg.pixel_count
+                await loop.run_in_executor(
+                    None, lambda: output.set_pattern(pattern, cfg.pixel_count))
+            else:
+                await loop.run_in_executor(None, output.all_off)
+            self.aim_light_on = on
+            await self.broadcast({"type": "aim_light", "on": on})
+        except Exception as e:
+            log.warning("Aim light: %s", e)
+        finally:
+            try:
+                await loop.run_in_executor(None, output.close)
+            except Exception:
+                pass
+
     async def _run_coded_scan(self):
         """Structured-light scan: log3(n)+2 frames instead of one per pixel.
 
@@ -1294,6 +1341,13 @@ class BlinkyServer:
         detected = 0
 
         try:
+            # The framing light would wash every coded frame to white and make
+            # every pixel undecidable. Clear it, but remember it was wanted.
+            if self.aim_light_on:
+                await loop.run_in_executor(None, output.all_off)
+                self.aim_light_on = False
+                await self.broadcast({"type": "aim_light", "on": False})
+
             # Hand the sensor the words so the encoding has exactly one
             # implementation; the client never re-derives them.
             words = {i: coded_word(i + 1, digits) for i in range(total)}
@@ -1367,6 +1421,11 @@ class BlinkyServer:
             await self.broadcast({"type": "confidence", **conf_summary})
             await self.broadcast({"type": "next_suggestion",
                                   **suggest_next_angle(self.model, self.model.sessions)})
+
+            # Relight for framing the next position. The operator is about to
+            # walk somewhere new and needs to see the prop to aim at it.
+            if self.aim_light_pref:
+                await self._set_aim_light(True)
 
         except asyncio.CancelledError:
             await loop.run_in_executor(None, output.all_off)

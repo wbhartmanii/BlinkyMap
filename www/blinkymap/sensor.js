@@ -15,7 +15,7 @@ import { Compass, angleDelta } from "./compass.js";
 import { CodedScan } from "./coded.js";
 import { Tilt, heightAboveAim, MAX_PITCH_DEG } from "./tilt.js";
 
-export const BUILD = "v32";
+export const BUILD = "v33";
 
 // Peak-to-peak movement across a capture, beyond which the pose recorded for
 // the session no longer describes all of its frames. Pitch comes from the
@@ -52,6 +52,7 @@ const aimPoint    = $("aim-point");
 const aimLabel    = $("aim-label");
 const tiltValue   = $("tilt-value");
 const btnScanHere = $("btn-scan-here");
+const btnAimLight = $("btn-aim-light");
 const scanHint    = $("scan-hint");
 
 const progressBlock = $("scan-progress-block");
@@ -84,6 +85,7 @@ let liveAngle = null;
 let targetAngle = null;   // suggested next position, from the server
 let suggestReason = "";
 let lastScan = null;
+let aimLightOn = false;
 let coded = null;         // active CodedScan
 let codedWords = null;    // pixel index -> base-3 code, supplied by the server
 
@@ -144,6 +146,13 @@ function send(obj) {
 
 async function onMessage(msg) {
   switch (msg.type) {
+    case "aim_light":
+      aimLightOn = !!msg.on;
+      btnAimLight.classList.toggle("btn-primary", aimLightOn);
+      btnAimLight.classList.toggle("btn-secondary", !aimLightOn);
+      btnAimLight.textContent = aimLightOn ? "Aim Light on" : "Aim Light";
+      break;
+
     case "coded_begin":
       // Structured-light scan: a handful of frames, each lighting every pixel.
       codedWords = msg.words || {};
@@ -547,6 +556,10 @@ btnScanHere.addEventListener("click", () => {
     progressBar.style.width = "0%";
     progressLabel.textContent = "0 / 0";
   }, 250);
+});
+
+btnAimLight.addEventListener("click", () => {
+  send({ type: "aim_light", on: !aimLightOn });
 });
 
 btnStopScan.addEventListener("click", () => {
