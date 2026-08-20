@@ -114,7 +114,7 @@ BlinkyMap talks to FPP via its REST API (with multisync support for remotes).
 Any controller FPP manages — wired or wireless — works automatically:
 
 - Falcon F16v3, F48, F4V3
-- Kulp K8 / K16 / K24 / K32
+- Kulp K2-Pi0 / K8 / K16 / K24 / K32
 - HinksPix PRO
 - Any FPP-connected E1.31/sACN pixel controller
 
