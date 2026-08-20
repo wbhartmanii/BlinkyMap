@@ -324,13 +324,14 @@ Locally, run them before trusting a geometry change:
   non-zero itself; under pytest its module-level checks would run at import
   and trip over the `sys.exit`.
 
-There is no build workflow any more. `build.yml` packaged the PyInstaller
-desktop app (`main.py`, `blinkymap/`, `BlinkyMap.spec`) — superseded by the
+There is no build workflow any more, and nothing left for it to build. The
+PyInstaller desktop app (`main.py`, `setup.py`, `blinkymap/`, `BlinkyMap.spec`,
+`pyproject.toml`) has been removed — superseded by the
 plugin, untouched since May, and never shipped from the README. It also never
 ran once: `shell: ${{ matrix.shell }}` is invalid (that key takes no
 expressions), and a workflow that fails validation never gets its `on:` filters
 evaluated either, so all 115 runs were instant zero-job failures on every
-branch. The desktop code is still in the tree; only the workflow is gone.
+branch. Both are gone now: the workflow, and the code it built.
 
 ## Testing Checklist
 0. **Confirm the string lights at all before blaming the plugin.** FPP UI →

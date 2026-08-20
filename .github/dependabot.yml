@@ -1,6 +1,8 @@
 version: 2
 updates:
-  # Python dependencies (blinkymap_server.py)
+  # Python dependencies (requirements.txt — what blinkymap_server.py needs).
+  # pyproject.toml is gone with the desktop app, so this no longer picks up
+  # opencv/Pillow/matplotlib/vispy, none of which the plugin uses.
   - package-ecosystem: pip
     directory: /
     schedule:
@@ -9,7 +11,7 @@ updates:
     labels:
       - dependencies
 
-  # GitHub Actions (for when CI workflows are added — see issue #18)
+  # GitHub Actions (tests.yml)
   - package-ecosystem: github-actions
     directory: /
     schedule:
