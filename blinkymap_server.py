@@ -271,6 +271,23 @@ def _make_output(cfg: "ControllerConfig"):
 #
 # The trailing two digits are a checksum, so a misread is detectable.
 
+# How long a coded frame must be held before the camera samples it.
+#
+# FPP acknowledges a "Custom Chase" command immediately — /api/testmode reports
+# enabled=1 with the full pattern the instant it is accepted — but takes far
+# longer to push those values to the string. Measured on a K2-Pi0 with 24
+# pixels, holding each of the five coded patterns for:
+#
+#     0.25s -> only 4 of 5 patterns ever appeared
+#     0.50s -> marginal, 5 patterns but not dependable
+#     1.00s -> all 5, reliably
+#
+# Below this the camera photographs a pattern that is still changing, or the
+# previous one, and every code it resolves is wrong. The scan reported frames
+# captured on schedule while the string sat dark.
+CODED_SETTLE_SEC = 0.9
+
+
 def coded_digit_count(pixel_count: int) -> int:
     """Frames needed: base-3 digits of pixel_count, plus two check digits."""
     count, p = 0, max(pixel_count, 1)
@@ -1620,7 +1637,7 @@ class BlinkyServer:
             # reflection, so the dominant channel flips frame to frame and the
             # region can produce a valid-looking code.
             await loop.run_in_executor(None, output.all_off)
-            await asyncio.sleep(max(cfg.inter_pixel_delay, 0.25))
+            await asyncio.sleep(max(cfg.inter_pixel_delay, CODED_SETTLE_SEC))
             self._awaiting_frame = -1
             self._frame_captured.clear()
             await self.broadcast({"type": "coded_dark"})
@@ -1636,8 +1653,10 @@ class BlinkyServer:
                 pattern = coded_frame_pattern(total, f, digits)
                 await loop.run_in_executor(
                     None, lambda p=pattern: output.set_pattern(p, total))
-                # Let the string latch and the camera settle before capturing.
-                await asyncio.sleep(max(cfg.inter_pixel_delay, 0.25))
+                # Let the string actually latch. FPP confirms the command long
+                # before the pixels change; sampling early photographs the
+                # previous pattern and every resolved code is wrong.
+                await asyncio.sleep(max(cfg.inter_pixel_delay, CODED_SETTLE_SEC))
 
                 # One retry. A frame the sensor never captures shifts every
                 # later frame into the wrong digit position, and since a code
