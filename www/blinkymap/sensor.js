@@ -15,7 +15,7 @@ import { Compass, angleDelta } from "./compass.js";
 import { CodedScan } from "./coded.js";
 import { Tilt, heightAboveAim, MAX_PITCH_DEG } from "./tilt.js";
 
-export const BUILD = "v40";
+export const BUILD = "v41";
 
 // Peak-to-peak movement across a capture, beyond which the pose recorded for
 // the session no longer describes all of its frames. Pitch comes from the
@@ -226,8 +226,10 @@ async function onMessage(msg) {
         console.log(`[BlinkyMap] pixel ${Number(k) + 1} not seen: ${misses[k]}`);
       }
       const drift = endCaptureSampling();
+      const diag = coded.stats();
+      console.log("[BlinkyMap] scan diagnostics", diag);
       send({ type: "coded_detections", detections: out,
-             found: nFound, missed: nMiss,
+             found: nFound, missed: nMiss, diag,
              // Mean over the capture beats the instantaneous value taken when
              // the session was created, and this lands before triangulation.
              device_pitch_deg: drift.devicePitch ? drift.devicePitch.mean : null,

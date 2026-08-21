@@ -199,6 +199,50 @@ export class CodedScan {
     return { found, misses };
   }
 
+  /**
+   * Why a scan resolved what it did.
+   *
+   * A scan that lights correctly and still returns nothing is otherwise a dead
+   * end: the failure could be masking, colour classification, or the codes
+   * themselves, and they are indistinguishable from the outside.
+   */
+  stats() {
+    const n = this.w * this.h;
+    const F = this.classes.length;
+    let masked = 0;
+    if (this.mask) for (let p = 0; p < n; p++) if (this.mask[p]) masked++;
+
+    // Per-frame: how much of the frame had a decidable colour at all
+    const perFrame = [];
+    const tally = [0, 0, 0];
+    for (let f = 0; f < F; f++) {
+      const cls = this.classes[f];
+      if (!cls) { perFrame.push(null); continue; }
+      let decided = 0;
+      for (let p = 0; p < n; p++) {
+        if (cls[p] !== CLASS_NONE) { decided++; tally[cls[p]]++; }
+      }
+      perFrame.push(+(decided / n * 100).toFixed(2));
+    }
+
+    // How many image pixels carried a complete code, and the commonest ones
+    const stats = this._accumulate();
+    let coded = 0;
+    for (const [, v] of stats) coded += v[0];
+    const top = [...stats.entries()]
+      .sort((a, b) => b[1][0] - a[1][0]).slice(0, 5)
+      .map(([code, v]) => ({ code: code.toString(3).padStart(F, "0"), px: v[0] }));
+
+    return {
+      maskedPct: +(masked / n * 100).toFixed(2),
+      decidedPctPerFrame: perFrame,
+      classTally: { red: tally[0], green: tally[1], blue: tally[2] },
+      pixelsWithCompleteCode: coded,
+      distinctCodes: stats.size,
+      topCodes: top,
+    };
+  }
+
   /** Free the per-frame buffers; they are large. */
   dispose() {
     this.classes = [];

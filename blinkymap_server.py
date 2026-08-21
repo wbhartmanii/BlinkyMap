@@ -1331,7 +1331,10 @@ class BlinkyServer:
                 self.current_session.device_pitch_deg = float(msg["device_pitch_deg"])
                 self.current_session.device_pitch_spread_deg = float(
                     msg.get("device_pitch_spread_deg", 0.0))
-            await self._coded_results.put(msg.get("detections") or {})
+            await self._coded_results.put({
+                "detections": msg.get("detections") or {},
+                "diag": msg.get("diag"),
+            })
 
         elif t == "start_coded_scan":
             if self.scan_task and not self.scan_task.done():
@@ -1681,11 +1684,27 @@ class BlinkyServer:
 
             # The sensor now does the intersection work and returns everything.
             await self.broadcast({"type": "coded_analyze"})
+            diag = None
             try:
-                dets = await asyncio.wait_for(self._coded_results.get(), timeout=120.0)
+                payload = await asyncio.wait_for(self._coded_results.get(), timeout=120.0)
+                dets = payload.get("detections", {})
+                diag = payload.get("diag")
             except asyncio.TimeoutError:
                 log.error("No coded_detections within 120s")
                 dets = {}
+
+            if diag:
+                # A scan that lights correctly and still resolves nothing is
+                # otherwise a dead end: masking, colour classification and the
+                # codes themselves all fail the same way from outside.
+                log.info("Scan diagnostics: masked=%.2f%% decidable/frame=%s "
+                         "classes=%s coded_px=%d distinct_codes=%d top=%s",
+                         diag.get("maskedPct", -1),
+                         diag.get("decidedPctPerFrame"),
+                         diag.get("classTally"),
+                         diag.get("pixelsWithCompleteCode", -1),
+                         diag.get("distinctCodes", -1),
+                         diag.get("topCodes"))
 
             for k, v in dets.items():
                 try:
