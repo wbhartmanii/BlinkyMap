@@ -242,6 +242,49 @@ Plugin is installed and verified here (2026-08-17).
 - **Server restart**: `sudo pkill -f blinkymap_server` (www/index.php auto-restarts on next page load)
 - **Logs**: `/tmp/blinkymap_server.log` on the box running the plugin
 
+## FPP timing — the trap that cost a whole session
+FPP **acknowledges a test command instantly and lights the string about a second
+later.** `GET /api/testmode` reports `enabled=1` with the full pattern the moment
+the command is accepted, so the API looks perfect while the pixels are still
+dark. Nothing short of watching the string can tell the difference.
+
+Measured on the K2-Pi0 with 24 pixels, holding each of five coded patterns:
+
+| hold | patterns that actually appeared |
+|---|---|
+| 0.25s | 4 of 5 |
+| 0.50s | 5, not dependable |
+| 1.00s | 5, reliably |
+
+Hence `CODED_SETTLE_SEC = 0.9`. Do not lower it without re-measuring **by eye**.
+
+**Never use `Test Stop` mid-scan.** `all_off()` disarms test mode, and re-arming
+takes roughly a second — far longer than swapping an active pattern. The dark
+reference frame originally used it, and the first coded frame after it was
+photographed black: 0.07% of the frame carried a decidable colour against 30-70%
+for every later frame. A pixel needs a colour in EVERY frame to carry a code, so
+that one blank frame voided entire scans (0-2 pixels resolved out of 24).
+`set_dark()` drives an all-black pattern instead, keeping test mode armed.
+
+The general lesson: **every automated test here passed while real scans failed.**
+The tests held patterns for 0.6s or more and fabricated detections rather than
+photographing real ones, so they never exercised the gap between "FPP accepted
+the command" and "the LEDs changed". When a scan misbehaves, get a human to
+watch the string at the real cadence before trusting any instrumentation.
+
+## Scan diagnostics
+The sensor reports why a scan resolved what it did, and the server logs it at
+INFO (`Scan diagnostics: ...`). Without it, masking, colour classification and
+code matching are indistinguishable from outside. Fields:
+
+- `masked%` — how much the dark reference frame blocked. High means the
+  reference frame is covering the prop itself.
+- `decidable%` per frame — fraction with an unambiguous dominant colour. A near
+  zero entry means that frame was photographed dark; it alone voids the scan.
+- `classTally` — red/green/blue totals. Lopsided values mean the camera is not
+  separating channels evenly.
+- `pixelsWithCompleteCode`, `distinctCodes`, `topCodes` — what actually assembled.
+
 ## FPP API Notes
 Verified against FPP 9.5.3 on 2026-08-17.
 - Light one pixel: `POST /api/command` with
@@ -309,6 +352,21 @@ Open, in rough priority order:
   disown the only version the plugin is confirmed against.
 - Extrapolate positions for unseen pixels from neighbours.
 - 2D-only mapping mode option.
+
+Added 2026-08-20, from the first cylinder scans that lit correctly:
+- **Green is under-detected roughly 4:1.** A real scan tallied red 483k, blue
+  963k, green 225k classified pixels. Pixels whose codes contain green digits
+  are systematically harder to resolve. Cause unknown — camera white balance, or
+  the LEDs' green simply reading dimmer to this sensor. Worth testing by driving
+  the three coded colours at different intensities.
+- **30-70% of the frame classifies as a colour**, which is enormous for 24 small
+  LEDs. At close range the string washes the whole room, and a reflection
+  carries the SAME code as the pixel that caused it. `resolve()` rejects
+  scattered codes, but may also be rejecting genuine pixels whose blob merges
+  with their own reflection.
+- **Saturation at close range is untested.** Scanning from 1.5ft was recommended
+  for angular resolution; bright LEDs that close may clip to white, which has no
+  dominant channel. Driving the coded frames at reduced intensity would test it.
 
 ## Tests
 `.github/workflows/tests.yml` runs all three on every push, to every branch.
