@@ -12,10 +12,10 @@
 
 import { openCamera, captureBackground, detectLED } from "./camera.js";
 import { Compass, angleDelta } from "./compass.js";
-import { CodedScan } from "./coded.js";
+import { CodedScan, frameSignature, signatureChange } from "./coded.js";
 import { Tilt, heightAboveAim, MAX_PITCH_DEG } from "./tilt.js";
 
-export const BUILD = "v42";
+export const BUILD = "v43";
 
 // Peak-to-peak movement across a capture, beyond which the pose recorded for
 // the session no longer describes all of its frames. Pitch comes from the
@@ -159,39 +159,68 @@ async function onMessage(msg) {
       // Structured-light scan: a handful of frames, each lighting every pixel.
       codedWords = msg.words || {};
       coded = new CodedScan(camWidth, camHeight, msg.frames);
+      lastFrameSig = null;
       setCamStatus(`Coded scan: ${msg.frames} frames for ${msg.pixel_count} pixels`,
                    "cam-status-bg");
       break;
 
     case "coded_dark": {
-      // Everything is off: whatever still shows is not one of ours.
+      // Everything is off: whatever still shows is not one of ours. Confirmed
+      // dark before it is believed — a reference frame photographed while the
+      // string is still lit masks the prop itself.
       if (!coded || !camPreview.srcObject) {
-        send({ type: "coded_frame_captured", index: -1 });
+        send({ type: "coded_frame_captured", index: -1,
+               confirmed: false, reason: "camera not open" });
         break;
       }
-      await sleep(140);
+      setCamStatus("Waiting for the string to go dark…", "cam-status-bg");
+      const c = await confirmFrame({
+        expectDark: true, timeoutMs: msg.timeout_ms, label: "Dark reference",
+      });
       const dctx = camCanvas.getContext("2d", { willReadFrequently: true });
       dctx.drawImage(camPreview, 0, 0, camCanvas.width, camCanvas.height);
       const blocked = coded.setMask(
         dctx.getImageData(0, 0, camCanvas.width, camCanvas.height));
-      setCamStatus(`Masked stray light (${(blocked * 100).toFixed(1)}% of frame)`,
-                   blocked > 0.25 ? "cam-status-bg" : "cam-status-on");
-      send({ type: "coded_frame_captured", index: -1 });
+      setCamStatus(c.confirmed
+        ? `Masked stray light (${(blocked * 100).toFixed(1)}% of frame)`
+        : "String never went dark — scanning without a mask",
+        c.confirmed && blocked <= 0.25 ? "cam-status-on" : "cam-status-bg");
+      send({ type: "coded_frame_captured", index: -1, ...c,
+             masked_pct: +(blocked * 100).toFixed(1),
+             reason: c.confirmed ? "" : "still lit" });
       break;
     }
 
     case "coded_frame": {
       if (!coded || !camPreview.srcObject) {
-        send({ type: "coded_frame_captured", index: msg.index });
+        send({ type: "coded_frame_captured", index: msg.index,
+               confirmed: false, reason: "camera not open" });
         break;
       }
-      // Let the sensor settle on the newly-lit frame before sampling it.
-      await sleep(140);
-      const ctx = camCanvas.getContext("2d", { willReadFrequently: true });
-      ctx.drawImage(camPreview, 0, 0, camCanvas.width, camCanvas.height);
-      coded.addFrame(ctx.getImageData(0, 0, camCanvas.width, camCanvas.height), msg.index);
-      setCamStatus(`Captured frame ${msg.index + 1} / ${msg.total}`, "cam-status-on");
-      send({ type: "coded_frame_captured", index: msg.index });
+      // Watch the video until the string is actually showing this pattern, and
+      // only then sample it. The server's hold is a floor; this is the proof.
+      const label = `Frame ${msg.index + 1} / ${msg.total}`;
+      setCamStatus(`${label} — waiting for the string…`, "cam-status-bg");
+      const c = await confirmFrame({
+        expectChange: msg.expect_change !== false,
+        timeoutMs: msg.timeout_ms, label,
+      });
+      if (c.confirmed) {
+        const ctx = camCanvas.getContext("2d", { willReadFrequently: true });
+        ctx.drawImage(camPreview, 0, 0, camCanvas.width, camCanvas.height);
+        coded.addFrame(ctx.getImageData(0, 0, camCanvas.width, camCanvas.height),
+                       msg.index);
+        setCamStatus(
+          `${label} captured in ${(c.settle_ms / 1000).toFixed(1)}s` +
+          (c.settled ? "" : " — still moving"),
+          c.settled ? "cam-status-on" : "cam-status-bg");
+      } else {
+        // Deliberately NOT stored. A frame the string never showed carries the
+        // previous pattern's colours, and one wrong digit voids every code.
+        setCamStatus(`${label}: string did not change — retrying`, "cam-status-off");
+      }
+      send({ type: "coded_frame_captured", index: msg.index, ...c,
+             reason: c.confirmed ? "" : "no change seen" });
       break;
     }
 
@@ -291,7 +320,8 @@ async function onMessage(msg) {
 
     case "progress":
       progressBar.style.width = `${((msg.index + 1) / msg.total) * 100}%`;
-      progressLabel.textContent = `${msg.index + 1} / ${msg.total}`;
+      progressLabel.textContent = `${msg.index + 1} / ${msg.total}` +
+        (msg.attempts > 1 ? ` · ${msg.attempts} tries` : "");
       break;
 
     case "scan_complete":
@@ -300,6 +330,18 @@ async function onMessage(msg) {
       btnScanHere.disabled = false;
       lastScan = msg;
       showNextStep();
+      break;
+
+    case "scan_aborted":
+      // The string stopped answering mid-scan. Ending here beats finishing a
+      // capture whose codes are known to be built from the wrong frames.
+      scanning = false;
+      progressBlock.style.display = "none";
+      btnScanHere.disabled = false;
+      endCaptureSampling();
+      if (coded) { coded.dispose(); coded = null; }
+      setCamStatus(msg.message || "Scan stopped — the string stopped responding",
+                   "cam-status-off");
       break;
 
     case "sensor_config":
@@ -336,6 +378,113 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 function setCamStatus(text, cls) {
   camStatusBar.textContent = text;
   camStatusBar.className = "cam-status " + cls;
+}
+
+// ── Frame confirmation ────────────────────────────────────────────────────────
+// FPP acknowledges a pattern about a second before the LEDs change, so any hold
+// the server picks is a guess — and a guess that comes up short photographs the
+// PREVIOUS pattern while reporting success. One wrong digit voids every code in
+// the scan, and nothing downstream can tell that happened.
+//
+// The camera is the only thing that can settle it, so the phone now watches the
+// video and answers the server per frame: the string changed, it has stopped
+// changing, here is the capture. A slow frame costs seconds instead of costing
+// the scan, and a frame that never arrives is reported rather than absorbed.
+//
+// Two conditions, and they are not the same question:
+//   change — the scene differs from the last confirmed frame, i.e. the new
+//            pattern has reached the string at all. This is the hard gate.
+//   settle — two consecutive polls agree, i.e. it is no longer mid-latch.
+//            Best-effort: a hand-held phone in a noisy exposure may never fully
+//            settle, and refusing the frame for that would fail scans that a
+//            fixed timer would have got right.
+const CONFIRM_POLL_MS     = 90;
+const CONFIRM_CHANGE_MIN  = 0.10;   // fraction of the lit region that must flip
+const CONFIRM_STABLE_MAX  = 0.03;   // poll-to-poll change counting as settled
+const CONFIRM_STABLE_HITS = 2;
+const CONFIRM_SETTLE_MS   = 1200;   // give up on settling this long after change
+const CONFIRM_TIMEOUT_MS  = 6000;
+const CONFIRM_DARK_MAX    = 0.25;   // lit fraction a dark reference may still show
+// Signature width in pixels. drawImage does the averaging on the GPU, so a poll
+// costs a ~40KB readback rather than a 720p one and can run ten times a second.
+const SIG_WIDTH = 160;
+
+let sigCanvas    = null;
+let lastFrameSig = null;   // signature of the last frame the string confirmed
+
+function signatureNow() {
+  if (!sigCanvas) sigCanvas = document.createElement("canvas");
+  const w = SIG_WIDTH;
+  const h = Math.max(1, Math.round(SIG_WIDTH * (camHeight / camWidth)));
+  if (sigCanvas.width !== w || sigCanvas.height !== h) {
+    sigCanvas.width = w; sigCanvas.height = h;
+  }
+  const ctx = sigCanvas.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(camPreview, 0, 0, w, h);
+  return frameSignature(ctx.getImageData(0, 0, w, h));
+}
+
+/**
+ * Poll the camera until the string is showing what the server just sent.
+ *
+ * @param {boolean} expectChange  the pattern differs from the previous frame's,
+ *                                so the scene must visibly change. The server
+ *                                computes this from the two patterns it drove,
+ *                                which is exact — a frame that genuinely repeats
+ *                                a colour would otherwise never confirm.
+ * @param {boolean} expectDark    the dark reference: judged by how little is
+ *                                lit, since "everything off" is not a change
+ *                                the previous frame can be compared against.
+ * @returns {{confirmed:boolean, settled:boolean, settle_ms:number,
+ *            change_pct:number, lit_pct:number}}
+ */
+async function confirmFrame({ expectChange = true, expectDark = false,
+                              timeoutMs, label = "" } = {}) {
+  const limit = timeoutMs || CONFIRM_TIMEOUT_MS;
+  const t0 = performance.now();
+  let prev = null, stable = 0, metAt = null, sig = null, change = 1;
+
+  const report = (confirmed, settled) => {
+    // The baseline only moves on a frame that was actually confirmed — plus the
+    // dark reference, which establishes what the scene looked like before any
+    // coded frame and is the thing frame 0 has to differ from.
+    //
+    // Moving it on a failure would be quietly fatal: a frame that arrives a
+    // moment after the timeout would become the baseline, the retry would then
+    // see no change against it, and a string that is showing exactly the right
+    // pattern would fail every remaining attempt and abort the scan.
+    if (confirmed || expectDark) lastFrameSig = sig;
+    return {
+      confirmed, settled,
+      settle_ms:  Math.round(performance.now() - t0),
+      change_pct: +(change * 100).toFixed(1),
+      lit_pct:    +(sig.litFrac * 100).toFixed(1),
+    };
+  };
+
+  for (;;) {
+    sig = signatureNow();
+    change = lastFrameSig ? signatureChange(lastFrameSig, sig) : 1;
+    const settle = prev ? signatureChange(prev, sig) : 1;
+    prev = sig;
+
+    const met = expectDark ? sig.litFrac <= CONFIRM_DARK_MAX
+                           : (!expectChange || change >= CONFIRM_CHANGE_MIN);
+    if (met) {
+      if (metAt === null) metAt = performance.now();
+      stable = settle <= CONFIRM_STABLE_MAX ? stable + 1 : 0;
+      if (stable >= CONFIRM_STABLE_HITS) return report(true, true);
+      if (performance.now() - metAt >= CONFIRM_SETTLE_MS) return report(true, false);
+    }
+
+    const waited = performance.now() - t0;
+    if (waited >= limit) return report(false, false);
+    if (label && waited > 800) {
+      setCamStatus(`${label} — waiting for the string (${(waited / 1000).toFixed(1)}s)…`,
+                   "cam-status-bg");
+    }
+    await sleep(CONFIRM_POLL_MS);
+  }
 }
 
 // ── Camera ────────────────────────────────────────────────────────────────────

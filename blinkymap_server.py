@@ -252,6 +252,96 @@ class FPPOutput:
         self._sess.close()
 
 
+# FPP keeps its pixel-string configuration in a couple of channel-output files,
+# depending on the hardware: co-pixelStrings for Pi hats and caps, co-bbbStrings
+# for BeagleBone capes. Both are served verbatim over the API.
+_STRING_CONFIG_ENDPOINTS = ("co-pixelStrings", "co-bbbStrings")
+
+
+def _collect_strings(node, out: List[dict], port=None):
+    """Walk a channel-output config, collecting anything that describes a string.
+
+    A recursive walk rather than a path lookup because the nesting differs by
+    output type and FPP version — ports, virtual strings, smart-receiver
+    branches — while the pair of keys that identifies a string does not.
+    """
+    if isinstance(node, dict):
+        port = node.get("portNumber", port)
+        if "pixelCount" in node and "startChannel" in node:
+            try:
+                count = int(node["pixelCount"])
+                start = int(node["startChannel"])
+            except (TypeError, ValueError):
+                count = start = 0
+            if count > 0:
+                out.append({
+                    "description": str(node.get("description") or "").strip(),
+                    "raw_start": start,
+                    "pixel_count": count,
+                    "port": port,
+                })
+        for v in node.values():
+            _collect_strings(v, out, port)
+    elif isinstance(node, list):
+        for v in node:
+            _collect_strings(v, out, port)
+
+
+def _controller_strings(host: str, timeout: float = 3.0) -> dict:
+    """What the controller says is wired to it:each string's channel and length.
+
+    The point is that this is already configured, on the box, correctly — the
+    operator set it up to make the string light at all. Making them retype the
+    pixel count into BlinkyMap invites a mismatch that shows up as a scan which
+    lights 24 pixels and then appears to stall for the other 76.
+
+    Channel numbering is the one subtlety. FPP shows a string's start channel
+    1-based and stores it 0-based, so a string starting at channel 1 appears as
+    0. Any entry reading 0 settles it for the whole file — channel 0 does not
+    exist 1-based. With no such entry the file cannot be read either way on its
+    own, so the value is passed through as written and the UI shows the channel
+    range for the operator to check against FPP's own display.
+    """
+    last_err = None
+    for endpoint in _STRING_CONFIG_ENDPOINTS:
+        try:
+            r = requests.get(f"http://{host}/api/channel/output/{endpoint}",
+                             timeout=timeout)
+            if r.status_code != 200:
+                continue
+            found: List[dict] = []
+            _collect_strings(r.json(), found)
+            if not found:
+                continue
+            zero_based = any(f["raw_start"] == 0 for f in found)
+            for f in found:
+                f["start_channel"] = f["raw_start"] + 1 if zero_based else f["raw_start"]
+                f["end_channel"] = f["start_channel"] + f["pixel_count"] * 3 - 1
+            found.sort(key=lambda f: f["start_channel"])
+            return {"ok": True, "strings": found, "source": endpoint,
+                    "zero_based": zero_based}
+        except Exception as e:
+            last_err = e
+    return {"ok": False, "strings": [],
+            "error": str(last_err) if last_err else "no pixel strings configured"}
+
+
+def _pick_string(strings: List[dict], start_channel: int) -> Optional[dict]:
+    """The configured string a start channel refers to, else the first one.
+
+    Matching on the start channel first means the count follows the port the
+    operator actually pointed at, which on a controller with several strings is
+    the only sensible reading of "how many pixels are there".
+    """
+    for st in strings:
+        if st["start_channel"] == start_channel:
+            return st
+    for st in strings:
+        if st["start_channel"] <= start_channel <= st["end_channel"]:
+            return st
+    return strings[0] if strings else None
+
+
 def _is_fpp(host: str) -> bool:
     """Return True if host is a reachable FPP instance."""
     try:
@@ -306,6 +396,52 @@ def _make_output(cfg: "ControllerConfig"):
 # previous one, and every code it resolves is wrong. The scan reported frames
 # captured on schedule while the string sat dark.
 CODED_SETTLE_SEC = 0.9
+
+# ...and why that number is no longer the thing the scan rests on.
+#
+# Every hold is a guess: FPP's latency is not observable from FPP. A hold that
+# comes up short photographs the PREVIOUS pattern while every log line reports
+# success, and since a code only resolves when every digit matches, one such
+# frame voids the whole scan silently. Measuring the hold by eye fixed the case
+# that was measured; it cannot cover a busier Pi, a longer string, or a day when
+# the network is slower.
+#
+# So the camera now answers per frame: the phone watches the video until the
+# scene actually changes, and only then captures and acks (see confirmFrame in
+# sensor.js). CODED_SETTLE_SEC survives as a FLOOR — no point polling a string
+# that has never once latched this fast — but the confirmation is what makes a
+# frame trustworthy. A slow frame now costs seconds instead of costing the scan.
+#
+# What that buys, and it is the whole point: a frame that never appears is
+# retried, and a frame that never appears after CODED_FRAME_ATTEMPTS aborts the
+# scan with a reason. Nothing downstream can distinguish a scan built on a stale
+# frame from one that simply saw nothing, so the honest place to fail is here.
+CODED_FRAME_ATTEMPTS = 3
+CODED_ACK_TIMEOUT    = 10.0   # per attempt; the phone gives up first, at 6s
+CODED_DARK_TIMEOUT   = 6.0
+
+# Below this fraction of pixels changing colour, consecutive patterns look alike
+# enough that "the scene changed" is not a fair test, so the phone is told to
+# confirm on stability alone. Computed from the two patterns actually driven,
+# which is exact — guessing it client-side would stall on a frame that legitimately
+# repeats most of its colours.
+CODED_EXPECT_CHANGE_FRAC = 0.15
+
+
+class CodedScanAborted(Exception):
+    """A frame never reached the string. Raised rather than scanning on."""
+
+
+def coded_pattern_change(before: Optional[str], after: str) -> float:
+    """Fraction of pixels whose colour differs between two hex patterns."""
+    if not before:
+        return 1.0
+    n = min(len(before), len(after)) // 6
+    if n == 0:
+        return 1.0
+    differ = sum(1 for i in range(n)
+                 if before[i * 6:(i + 1) * 6] != after[i * 6:(i + 1) * 6])
+    return differ / n
 
 
 def coded_digit_count(pixel_count: int) -> int:
@@ -1185,13 +1321,23 @@ class BlinkyServer:
         # Signalled by the sensor once its multi-frame baseline is captured.
         self._bg_ready: asyncio.Event = asyncio.Event()
 
+        # Whether the pixel count and start channel came from the control UI.
+        # Until they do, the controller's own configuration is the better source
+        # and is allowed to overwrite the defaults; after that it never is.
+        self._config_from_ui = False
+
         # Coded-scan handshakes: one per captured frame, then the batch result.
         # The ack carries the frame index and only satisfies the wait for THAT
         # frame. With a bare event, an ack arriving late for frame 2 released
         # the wait for frame 3, and every subsequent frame was released early by
         # the previous one's straggler — the string visibly raced through the
         # remaining patterns while the sensor captured almost none of them.
-        self._frame_captured: asyncio.Event = asyncio.Event()
+        #
+        # A future rather than an event, because the ack now carries the phone's
+        # verdict on the frame — whether the string was seen to change, how long
+        # it took, how much of the view was lit — and the scan decides whether to
+        # retry from that. An event could only say "something answered".
+        self._frame_ack: Optional[asyncio.Future] = None
         self._awaiting_frame: Optional[int] = None
         self._coded_results: asyncio.Queue = asyncio.Queue()
 
@@ -1314,6 +1460,11 @@ class BlinkyServer:
             log.info("Client declared role=%s (%d total)", role, len(self.clients))
             if role == "sensor":
                 await ws.send(json.dumps(self._sensor_config()))
+            if role == "control":
+                # Ask the controller how many pixels are actually wired before
+                # the operator has to guess. Backgrounded: an unreachable host
+                # must not hold up the page.
+                asyncio.create_task(self._probe_strings(ws, auto=True))
             await self.broadcast(self._sensor_summary(), role="control")
 
         elif t == "pose":
@@ -1340,8 +1491,11 @@ class BlinkyServer:
 
         elif t == "coded_frame_captured":
             idx = msg.get("index")
-            if self._awaiting_frame is not None and idx == self._awaiting_frame:
-                self._frame_captured.set()
+            fut = self._frame_ack
+            if (fut is not None and not fut.done()
+                    and self._awaiting_frame is not None
+                    and idx == self._awaiting_frame):
+                fut.set_result(msg)
             else:
                 log.debug("Ignoring ack for frame %s while awaiting %s",
                           idx, self._awaiting_frame)
@@ -1371,6 +1525,12 @@ class BlinkyServer:
                 return
             self.scan_task = asyncio.create_task(self._run_coded_scan())
 
+        elif t == "probe_strings":
+            # "Use controller config" on the setup tab, and the host may not be
+            # the saved one — the operator is often correcting it.
+            asyncio.create_task(self._probe_strings(
+                ws, host=msg.get("host"), apply=bool(msg.get("apply"))))
+
         elif t == "clear_reference":
             self.heading_reference = None
             await self.broadcast(self._sensor_summary())
@@ -1392,6 +1552,7 @@ class BlinkyServer:
             self.model.pixel_count        = self.config.pixel_count
             self.model.pixel_pitch_m            = self.config.pixel_pitch_m
             self.model.string_breaks      = self.config.string_breaks
+            self._config_from_ui          = True
             await self.broadcast(self._sensor_config(), role="sensor")
             await ws.send(json.dumps({"type": "status", "message": "Config saved"}))
             asyncio.create_task(self._probe_controller(ws))
@@ -1567,6 +1728,53 @@ class BlinkyServer:
                 except Exception:
                     pass
 
+    async def _probe_strings(self, ws: Optional[WebSocketServerProtocol] = None,
+                             auto: bool = False, host: Optional[str] = None,
+                             apply: bool = False):
+        """Read the controller's string configuration and, when asked, adopt it.
+
+        `auto` adopts only while the control UI has not set a count itself: a
+        fresh page should come up describing the prop that is actually wired,
+        not a 100-pixel guess, but a number the operator typed is theirs.
+        """
+        loop = asyncio.get_running_loop()
+        h = (host or self.config.host).strip()
+        result = await loop.run_in_executor(None, lambda: _controller_strings(h))
+        applied = None
+        if result["ok"] and (apply or (auto and not self._config_from_ui)):
+            st = _pick_string(result["strings"], self.config.start_channel)
+            if st:
+                self.config.start_channel = st["start_channel"]
+                self.config.pixel_count   = st["pixel_count"]
+                self.model.pixel_count    = st["pixel_count"]
+                # String breaks are deliberately left alone: they are the
+                # operator's statement about the physical run, and a break that
+                # now sits past the end simply never matches a pair.
+                applied = {"start_channel": st["start_channel"],
+                           "pixel_count": st["pixel_count"],
+                           "description": st["description"]}
+                log.info("Adopted controller config: %s pixels from ch %d (%s)",
+                         st["pixel_count"], st["start_channel"],
+                         st["description"] or f"port {st['port']}")
+        if result["ok"]:
+            log.info("Controller %s reports %d string(s) in %s: %s", h,
+                     len(result["strings"]), result.get("source"),
+                     ", ".join(f"{st['pixel_count']}px @ ch {st['start_channel']}"
+                               for st in result["strings"]))
+        else:
+            log.info("Controller %s: no string config (%s)", h, result.get("error"))
+
+        payload = {"type": "controller_strings", "host": h, "applied": applied,
+                   "start_channel": self.config.start_channel,
+                   "pixel_count": self.config.pixel_count, **result}
+        if ws is not None:
+            try:
+                await ws.send(json.dumps(payload))
+            except Exception:
+                pass
+        else:
+            await self.broadcast(payload, role="control")
+
     async def _probe_controller(self, ws: WebSocketServerProtocol):
         cfg  = self.config
         loop = asyncio.get_running_loop()
@@ -1625,6 +1833,45 @@ class BlinkyServer:
             except Exception:
                 pass
 
+    def _has_sensor(self) -> bool:
+        return any(r == "sensor" for r in self.clients.values())
+
+    async def _capture_frame(self, index: int, total_frames: int, *,
+                             expect_change: bool = True,
+                             expect_dark: bool = False,
+                             attempt: int = 1,
+                             timeout: float = CODED_ACK_TIMEOUT) -> Optional[dict]:
+        """Ask the sensor to confirm the string and capture it; await its verdict.
+
+        Returns the ack — `confirmed`, `settled`, `settle_ms`, `change_pct`,
+        `lit_pct` — or None if nothing answered in time. The phone's own timeout
+        is shorter, so a None here means the phone is gone, not that the frame
+        was slow.
+        """
+        if not self._has_sensor():
+            return None
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        self._awaiting_frame = index
+        self._frame_ack = fut
+        try:
+            await self.broadcast({
+                "type": "coded_dark" if index < 0 else "coded_frame",
+                "index": index, "total": total_frames,
+                "expect_change": expect_change,
+                "expect_dark": expect_dark,
+                "attempt": attempt,
+                # The phone gives up first, deliberately: a verdict of "never
+                # changed" is actionable and a silence is not.
+                "timeout_ms": int(max(1.0, timeout - 2.0) * 1000),
+            })
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            self._awaiting_frame = None
+            self._frame_ack = None
+
     async def _run_coded_scan(self):
         """Structured-light scan: log3(n)+2 frames instead of one per pixel.
 
@@ -1664,47 +1911,94 @@ class BlinkyServer:
             # out. Near such a light the camera sees it PLUS the string's
             # reflection, so the dominant channel flips frame to frame and the
             # region can produce a valid-looking code.
-            await loop.run_in_executor(None, lambda: output.set_dark(total))
-            await asyncio.sleep(max(cfg.inter_pixel_delay, CODED_SETTLE_SEC))
-            self._awaiting_frame = -1
-            self._frame_captured.clear()
-            await self.broadcast({"type": "coded_dark"})
-            try:
-                # Short: the mask is an optimisation, and a sensor that cannot
-                # supply one must not hold the prop dark while the operator
-                # waits wondering whether the scan has hung.
-                await asyncio.wait_for(self._frame_captured.wait(), timeout=3.0)
-            except asyncio.TimeoutError:
-                log.warning("No dark-frame ack in 3s — scanning without a mask")
+            # A scan that aborted mid-flight can leave its detections behind:
+            # the phone finishes analysing and answers a request nobody is
+            # waiting for any more. Consumed here, that stale payload would be
+            # taken for THIS scan's result.
+            while not self._coded_results.empty():
+                try:
+                    self._coded_results.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
 
+            hold = max(cfg.inter_pixel_delay, CODED_SETTLE_SEC)
+            dark_pattern = "000000" * total
+            ack = None
+            for attempt in (1, 2):
+                await loop.run_in_executor(None, lambda: output.set_dark(total))
+                await asyncio.sleep(hold)
+                # The mask is an optimisation, so a phone that cannot confirm
+                # darkness costs the mask and not the scan. It is still worth
+                # asking: a reference frame taken while the string is lit masks
+                # the prop itself, which is far worse than having no mask.
+                ack = await self._capture_frame(-1, digits, expect_change=False,
+                                                expect_dark=True, attempt=attempt,
+                                                timeout=CODED_DARK_TIMEOUT)
+                if ack and ack.get("confirmed"):
+                    log.info("Dark reference confirmed in %sms (masked %s%% of frame)",
+                             ack.get("settle_ms"), ack.get("masked_pct"))
+                    break
+                log.warning("Dark reference not confirmed (attempt %d): %s",
+                            attempt, (ack or {}).get("reason", "no ack"))
+            if not (ack and ack.get("confirmed")):
+                await self.broadcast({"type": "status",
+                                      "message": "String never went dark — scanning without a mask"})
+
+            prev_pattern = dark_pattern
             for f in range(digits):
                 pattern = coded_frame_pattern(total, f, digits)
-                await loop.run_in_executor(
-                    None, lambda p=pattern: output.set_pattern(p, total))
-                # Let the string actually latch. FPP confirms the command long
-                # before the pixels change; sampling early photographs the
-                # previous pattern and every resolved code is wrong.
-                await asyncio.sleep(max(cfg.inter_pixel_delay, CODED_SETTLE_SEC))
+                # Exact, because the server drove both patterns: below this the
+                # phone must not be asked to wait for a change that the frames
+                # themselves do not contain.
+                changed = coded_pattern_change(prev_pattern, pattern)
+                expect_change = changed >= CODED_EXPECT_CHANGE_FRAC
 
-                # One retry. A frame the sensor never captures shifts every
-                # later frame into the wrong digit position, and since a code
-                # only resolves when every digit matches, one dropped ack
-                # silently voids the entire scan.
-                for attempt in (1, 2):
-                    self._awaiting_frame = f
-                    self._frame_captured.clear()
-                    t0 = time.time()
-                    await self.broadcast({"type": "coded_frame",
-                                          "index": f, "total": digits})
-                    try:
-                        await asyncio.wait_for(self._frame_captured.wait(), timeout=6.0)
-                        log.debug("Frame %d acked in %.2fs", f, time.time() - t0)
+                ack = None
+                for attempt in range(1, CODED_FRAME_ATTEMPTS + 1):
+                    # Re-pushed on every attempt: the cheapest explanation for a
+                    # frame that never appeared is a command FPP dropped.
+                    await loop.run_in_executor(
+                        None, lambda p=pattern: output.set_pattern(p, total))
+                    # A floor, not the guarantee — the string has never once
+                    # latched faster than this, so polling sooner is wasted work.
+                    await asyncio.sleep(hold)
+                    ack = await self._capture_frame(f, digits,
+                                                    expect_change=expect_change,
+                                                    attempt=attempt)
+                    if ack and ack.get("confirmed"):
                         break
-                    except asyncio.TimeoutError:
-                        log.warning("Frame %d: no ack in 6s (attempt %d)", f, attempt)
-                await self.broadcast({"type": "progress", "index": f, "total": digits})
+                    reason = (ack or {}).get("reason") or "no ack"
+                    log.warning("Frame %d/%d not confirmed (attempt %d/%d): %s",
+                                f + 1, digits, attempt, CODED_FRAME_ATTEMPTS, reason)
+                    await self.broadcast({
+                        "type": "status",
+                        "message": f"Frame {f + 1}: {reason} — retrying "
+                                   f"({attempt}/{CODED_FRAME_ATTEMPTS})"})
 
-            self._awaiting_frame = None
+                if not (ack and ack.get("confirmed")):
+                    if not self._has_sensor():
+                        raise CodedScanAborted(
+                            f"The phone stopped answering at frame {f + 1} of "
+                            f"{digits}. Reconnect it and scan again.")
+                    raise CodedScanAborted(
+                        f"Frame {f + 1} of {digits} never appeared on the string "
+                        f"after {CODED_FRAME_ATTEMPTS} tries. Nothing was captured "
+                        f"for it, so the scan would resolve nothing — check the "
+                        f"controller and scan again.")
+
+                log.info("Frame %d/%d confirmed in %sms on attempt %d "
+                         "(change %s%%, lit %s%%, settled=%s)",
+                         f + 1, digits, ack.get("settle_ms"), attempt,
+                         ack.get("change_pct"), ack.get("lit_pct"),
+                         ack.get("settled"))
+                await self.broadcast({
+                    "type": "progress", "index": f, "total": digits,
+                    "confirmed": True, "attempts": attempt,
+                    "settle_ms": ack.get("settle_ms"),
+                    "settled": ack.get("settled", True),
+                })
+                prev_pattern = pattern
+
             await loop.run_in_executor(None, output.all_off)
 
             # The sensor now does the intersection work and returns everything.
@@ -1780,11 +2074,24 @@ class BlinkyServer:
 
             # Relight for framing the next position. The operator is about to
             # walk somewhere new and needs to see the prop to aim at it.
+        except CodedScanAborted as e:
+            # Stopping beats finishing. A scan that carries on past a frame the
+            # string never showed still produces a confident-looking set of
+            # positions, and nothing downstream can tell them from good ones.
+            log.error("_run_coded_scan aborted: %s", e)
+            await loop.run_in_executor(None, output.all_off)
+            await self.broadcast({"type": "scan_aborted", "message": str(e)})
+            await self.broadcast({"type": "status", "message": str(e)})
         except asyncio.CancelledError:
             await loop.run_in_executor(None, output.all_off)
+            # scan_aborted as well as the status line: it is what releases the
+            # phone's Scan button, which a stopped scan used to leave disabled
+            # until the page was reloaded.
+            await self.broadcast({"type": "scan_aborted", "message": "Scan stopped"})
             await self.broadcast({"type": "status", "message": "Scan stopped"})
         except Exception as e:
             log.error("_run_coded_scan failed: %s", e, exc_info=True)
+            await self.broadcast({"type": "scan_aborted", "message": f"Scan error: {e}"})
             await self.broadcast({"type": "status", "message": f"Scan error: {e}"})
         finally:
             try:
@@ -1915,6 +2222,9 @@ class BlinkyServer:
 async def main_async(port: int):
     server = BlinkyServer()
     log.info("BlinkyMap WebSocket server starting on port %d", port)
+    # The plugin runs on the controller, so its own configuration is right here
+    # and is a far better default than a hard-coded pixel count.
+    asyncio.create_task(server._probe_strings(auto=True))
     async with websockets.serve(server.handler, "0.0.0.0", port):
         await asyncio.Future()   # run forever
 

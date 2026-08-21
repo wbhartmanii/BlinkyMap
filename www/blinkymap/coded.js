@@ -24,6 +24,70 @@
 
 const CLASS_NONE = 3;
 
+// Defaults for the colour classifier. A region counts as red/green/blue only if
+// that channel clearly leads: dim and near-neutral regions are left undecided so
+// they can never satisfy a code. Shared so that the coarse signature used to
+// CONFIRM a frame classifies exactly the way the capture that follows it will —
+// a confirmation made under different thresholds would be confirming a
+// different image.
+const CLASS_MIN_LEVEL = 40;
+const CLASS_MARGIN    = 1.25;
+
+/**
+ * Classify every pixel of `data` by dominant colour channel into `out`.
+ *
+ * One implementation, two callers (the capture path and the confirmation
+ * signature) — kept as a free function with everything passed in so the hot
+ * loop stays monomorphic; this runs once per image pixel per frame.
+ */
+function classifyInto(data, n, out, minLevel, margin, mask) {
+  let decided = 0;
+  for (let p = 0, i = 0; p < n; p++, i += 4) {
+    if (mask && mask[p]) { out[p] = CLASS_NONE; continue; }
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    let c = CLASS_NONE;
+    if (r >= minLevel && r >= g * margin && r >= b * margin)      c = 0;
+    else if (g >= minLevel && g >= r * margin && g >= b * margin) c = 1;
+    else if (b >= minLevel && b >= r * margin && b >= g * margin) c = 2;
+    if (c !== CLASS_NONE) decided++;
+    out[p] = c;
+  }
+  return decided;
+}
+
+/**
+ * Coarse colour-class map of one video frame, for confirming that the string
+ * actually changed.
+ *
+ * Intended to be fed a heavily downscaled frame (the GPU does the averaging in
+ * drawImage), so a poll costs a small readback rather than a full 720p one and
+ * can run several times a second while the operator waits.
+ */
+export function frameSignature(imageData, minLevel = CLASS_MIN_LEVEL,
+                               margin = CLASS_MARGIN) {
+  const n = imageData.width * imageData.height;
+  const cls = new Uint8Array(n);
+  const decided = classifyInto(imageData.data, n, cls, minLevel, margin, null);
+  return { cls, n, decided, litFrac: decided / n };
+}
+
+/**
+ * How much two signatures differ, as a fraction of the lit region.
+ *
+ * Measured against the LIT population rather than the whole image: the prop
+ * occupies a small part of the frame, so a change normalised by image area
+ * would be a fraction of a percent whether the pattern changed or not. The
+ * floor keeps a nearly dark pair — where a couple of noisy points would
+ * otherwise read as a total change — from claiming a change it cannot support.
+ */
+export function signatureChange(a, b) {
+  if (!a || !b || a.n !== b.n) return 1;
+  let differ = 0;
+  for (let p = 0; p < a.n; p++) if (a.cls[p] !== b.cls[p]) differ++;
+  const pop = Math.max(a.decided, b.decided, a.n * 0.005);
+  return Math.min(1, differ / pop);
+}
+
 /** Accumulates classified frames and resolves pixel positions at the end. */
 export class CodedScan {
   /**
@@ -86,20 +150,10 @@ export class CodedScan {
    * satisfy a code. `margin` is how far ahead the winner must be — raising it
    * trades detections for certainty.
    */
-  addFrame(imageData, index, minLevel = 40, margin = 1.25) {
-    const d = imageData.data;
+  addFrame(imageData, index, minLevel = CLASS_MIN_LEVEL, margin = CLASS_MARGIN) {
     const n = this.w * this.h;
     const cls = new Uint8Array(n);
-    const mask = this.mask;
-    for (let p = 0, i = 0; p < n; p++, i += 4) {
-      if (mask && mask[p]) { cls[p] = CLASS_NONE; continue; }
-      const r = d[i], g = d[i + 1], b = d[i + 2];
-      let c = CLASS_NONE;
-      if (r >= minLevel && r >= g * margin && r >= b * margin)      c = 0;
-      else if (g >= minLevel && g >= r * margin && g >= b * margin) c = 1;
-      else if (b >= minLevel && b >= r * margin && b >= g * margin) c = 2;
-      cls[p] = c;
-    }
+    classifyInto(imageData.data, n, cls, minLevel, margin, this.mask);
     // Stored BY INDEX, not appended. A frame the phone never captured — the
     // server gives up after a timeout and lights the next pattern regardless —
     // would otherwise shift every later frame into the wrong digit position,

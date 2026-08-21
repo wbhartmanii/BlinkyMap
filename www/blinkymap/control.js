@@ -31,6 +31,8 @@ const cfgMinConf     = document.getElementById("cfg-min-conf");
 const cfgPixelPitch  = document.getElementById("cfg-pixel-pitch");
 const cfgBreaks      = document.getElementById("cfg-breaks");
 const cfgMinConfVal  = document.getElementById("cfg-min-conf-val");
+const btnDetectStrings   = document.getElementById("btn-detect-strings");
+const cfgStringsHint     = document.getElementById("cfg-strings");
 const btnSaveConfig      = document.getElementById("btn-save-config");
 const controllerStatus   = document.getElementById("controller-status");
 const btnTestBlink       = document.getElementById("btn-test-blink");
@@ -145,7 +147,7 @@ async function handleServerMessage(msg) {
       break;
 
     case "progress":
-      updateProgress(msg.index + 1, msg.total);
+      updateProgress(msg.index + 1, msg.total, msg);
       break;
 
     case "scan_complete":
@@ -193,6 +195,21 @@ async function handleServerMessage(msg) {
     case "session_deleted":
       sessions = sessions.filter(s => s.id !== msg.session_id);
       sessionList.querySelector(`[data-session-id="${msg.session_id}"]`)?.remove();
+      break;
+
+    case "controller_strings":
+      showControllerStrings(msg);
+      break;
+
+    case "scan_aborted":
+      // A frame never reached the string, so the scan stopped rather than
+      // resolving codes built from the wrong frames.
+      scanning = false;
+      scanBlock.style.display = "none";
+      statusMsg(msg.message || "Scan stopped");
+      controllerStatus.textContent = msg.message || "Scan stopped";
+      controllerStatus.className   = "controller-status ctrl-fail";
+      controllerStatus.style.display = "block";
       break;
 
     case "controller_status":
@@ -315,11 +332,65 @@ btnStopScan.addEventListener("click", () => {
 });
 
 // ── UI helpers ────────────────────────────────────────────────────────────────
-function updateProgress(done, total) {
+function updateProgress(done, total, info = null) {
   const pct = total > 0 ? (done / total) * 100 : 0;
   progressBar.style.width = `${pct}%`;
-  progressLabel.textContent = `${done} / ${total}`;
+  // Say what the phone confirmed, not just that a frame went by. The whole
+  // point of the handshake is that "frame 3 of 5" now means the string was
+  // seen showing frame 3, and that is worth showing.
+  let note = "";
+  if (info && info.settle_ms != null) {
+    note = ` · confirmed in ${(info.settle_ms / 1000).toFixed(1)}s`;
+    if (info.attempts > 1) note += ` after ${info.attempts} tries`;
+    if (info.settled === false) note += " (still moving)";
+  }
+  progressLabel.textContent = `${done} / ${total}${note}`;
 }
+
+// ── Controller string config ──────────────────────────────────────────────────
+// The controller already knows how many pixels are wired to each port — the
+// operator configured it there to make the string light at all. Retyping that
+// number here is just an opportunity to get it wrong, and a mismatch shows up
+// as a scan that lights 24 pixels and then appears to stall for the other 76.
+// The description is whatever the operator typed into FPP and the host is
+// whatever they typed here; neither is markup.
+const esc = (v) => String(v ?? "").replace(/[&<>"]/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function showControllerStrings(msg) {
+  cfgStringsHint.style.display = "block";
+  if (!msg.ok || !msg.strings.length) {
+    cfgStringsHint.className = "controller-status ctrl-fail";
+    cfgStringsHint.textContent =
+      `${msg.host}: no pixel-string config readable (${msg.error || "none configured"}) — enter the count by hand.`;
+    return;
+  }
+  if (msg.applied) {
+    cfgStart.value  = msg.applied.start_channel;
+    cfgPixels.value = msg.applied.pixel_count;
+  }
+  const rows = msg.strings.map(st => {
+    const name = esc(st.description) || (st.port != null ? `Port ${st.port}` : "String");
+    const here = st.start_channel === parseInt(cfgStart.value) ? " ← selected" : "";
+    return `<div class="string-row"><span>${name}</span>` +
+           `<span>${st.pixel_count} px · ch ${st.start_channel}–${st.end_channel}${here}</span></div>`;
+  }).join("");
+  cfgStringsHint.className = "controller-status ctrl-ok";
+  cfgStringsHint.innerHTML =
+    `<div>${esc(msg.host)} reports ${msg.strings.length} configured string` +
+    `${msg.strings.length === 1 ? "" : "s"}:</div>${rows}` +
+    (msg.zero_based === false
+      ? `<div class="slider-hint">Channel numbers are as the controller stores them;
+         check them against FPP's own output page if a scan lights nothing.</div>`
+      : "");
+}
+
+btnDetectStrings.addEventListener("click", () => {
+  send({ type: "probe_strings", host: cfgHost.value.trim(), apply: true });
+  cfgStringsHint.style.display = "block";
+  cfgStringsHint.className = "controller-status ctrl-ok";
+  cfgStringsHint.textContent = `Asking ${cfgHost.value.trim()} what is wired…`;
+});
 
 function sessionPosStr(angle, distM, heightM, devicePitch) {
   // heightM is the camera's height above its AIM POINT, not above the floor —

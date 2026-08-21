@@ -17,7 +17,10 @@ BlinkyMap is an FPP (Falcon Player) plugin that automatically builds a 3D xLight
   starts scans (the operator is standing at the position). Single fixed screen,
   never scrolls.
 - **`www/blinkymap/coded.js`** — structured-light detection: classifies each
-  frame by dominant colour and resolves every pixel in one pass.
+  frame by dominant colour and resolves every pixel in one pass. Also exports
+  the coarse `frameSignature`/`signatureChange` pair the phone confirms frames
+  with, classified by the same rules so a confirmation and the capture that
+  follows it are judging the same image.
 - **`www/blinkymap/camera.js`** — getUserMedia, multi-frame baseline, and the
   legacy one-pixel-at-a-time detector.
 - **`www/blinkymap/compass.js`** — device heading, normalised across iOS/Android.
@@ -231,7 +234,8 @@ Plugin is installed and verified here (2026-08-17).
   | 1 | Test String 2 | 100 | 1001–1300 | no |
   Channels 73–1000 map to nothing. A sweep spanning both strings lights 24
   pixels and then appears to stall — that is the gap, not a bug.
-  Use Start Channel `1`, Pixel Count `24`.
+  Start Channel `1`, Pixel Count `24` — now read off the box itself rather than
+  typed, which is what this table is here to check the reading against.
 - SSH: `ssh fpp@192.168.25.111` (key `~/.ssh/fpp_ed25519`, entry in `~/.ssh/config`)
 
 ### Older boxes (from earlier sessions, not currently in use)
@@ -256,7 +260,13 @@ Measured on the K2-Pi0 with 24 pixels, holding each of five coded patterns:
 | 0.50s | 5, not dependable |
 | 1.00s | 5, reliably |
 
-Hence `CODED_SETTLE_SEC = 0.9`. Do not lower it without re-measuring **by eye**.
+Hence `CODED_SETTLE_SEC = 0.9` — but that is now a **floor, not the
+guarantee**. Every hold is a guess by construction, because FPP's latency is not
+observable from FPP: measuring it by eye fixed the case that was measured, not a
+busier Pi, a longer string, or a slower day. So the phone now confirms each
+frame from the video before it is captured, and the timer only keeps it from
+polling a string that has never once latched that fast. See "Per-frame
+confirmation" below.
 
 **Never use `Test Stop` mid-scan.** `all_off()` disarms test mode, and re-arming
 takes roughly a second — far longer than swapping an active pattern. The dark
@@ -271,6 +281,74 @@ The tests held patterns for 0.6s or more and fabricated detections rather than
 photographing real ones, so they never exercised the gap between "FPP accepted
 the command" and "the LEDs changed". When a scan misbehaves, get a human to
 watch the string at the real cadence before trusting any instrumentation.
+
+## Per-frame confirmation — the phone answers, the clock does not
+A coded frame is only worth capturing once the string is actually showing it,
+and only the camera can say when that is. Each frame is now a round trip:
+
+    server: push pattern -> hold (floor) -> "coded_frame f, expect_change"
+    phone:  poll the video until the scene changes and settles -> capture -> ack
+    server: confirmed? next frame. not confirmed? re-push and ask again.
+            still not confirmed after CODED_FRAME_ATTEMPTS -> abort with a reason
+
+Notes on each half, because the details are where this goes wrong:
+
+- **Change is the hard gate; settling is best-effort.** "Did the string change"
+  is the correctness question. "Has it stopped changing" is a quality question,
+  and a hand-held phone in a noisy exposure may never fully settle — refusing
+  the frame for that would fail scans a fixed timer would have got right. So the
+  phone confirms on change, waits up to `CONFIRM_SETTLE_MS` for stability, and
+  reports `settled: false` rather than failing.
+- **The change threshold is measured against the LIT region, not the frame.**
+  24 LEDs are ~1% of a 720p frame; normalised by area, a total pattern swap
+  would read as a 1% change and be indistinguishable from sensor noise.
+- **`expect_change` is computed by the server from the two patterns it drove**,
+  so it is exact. A frame whose colours mostly repeat the previous one would
+  otherwise wait for a change that the frames themselves do not contain.
+  `tests/test_frame_confirm.py` asserts no real scan transition falls below the
+  threshold, at 24, 50, 100 and 500 pixels.
+- **The phone times out two seconds before the server does.** A verdict of "no
+  change seen" is actionable; a silence is not.
+- **An unconfirmable frame aborts the scan** (`scan_aborted`, shown on both
+  UIs). A scan that carries on past a frame the string never showed still
+  produces a confident-looking set of positions and nothing downstream can tell
+  them from good ones — so the honest place to fail is at the frame.
+- **The dark reference is confirmed too, but only ever costs the mask.** It is
+  judged by how little is lit rather than by change, and a scan that cannot get
+  a clean one proceeds unmasked and says so.
+- **The baseline only advances on a confirmed frame.** Moving it on a failure is
+  quietly fatal: a frame arriving just after the timeout becomes the baseline,
+  the retry then sees no change against it, and a string showing exactly the
+  right pattern fails every remaining attempt.
+
+Cost: a clean 24-pixel scan is roughly as fast as before (the hold dominates,
+and confirmation adds ~0.3s per frame). A frame that needs retrying costs
+seconds instead of costing the scan.
+
+## Pixel count comes from the controller
+The controller already knows how many pixels are on each port — the operator
+configured it there to make the string light at all. Re-typing that number into
+BlinkyMap only creates an opportunity for it to disagree, and on the test box a
+100-pixel default against a 24-pixel string looks exactly like a hung scan (see
+the pixel-setup table below: the sweep lights 24 and then walks the dead gap to
+channel 1000).
+
+`_controller_strings()` reads `/api/channel/output/co-pixelStrings` — and
+`co-bbbStrings` for BeagleBone capes — and walks the JSON for anything carrying
+both `pixelCount` and `startChannel`. A recursive walk rather than a path lookup
+because the nesting differs by output type and FPP version while that pair of
+keys does not. It is adopted at server start, and again when a control client
+connects, unless the control UI has set the count itself; "Use controller's
+string config" on the Setup tab applies it on demand.
+
+**The one subtlety is channel numbering.** FPP shows a virtual string's start
+channel 1-based and stores it 0-based, so a string starting at channel 1 appears
+in the file as 0. Any entry reading 0 settles it for the whole file — channel 0
+does not exist 1-based. With no such entry the file cannot be read either way on
+its own, so the value is passed through as written and the UI shows the derived
+channel range for the operator to check against FPP's own output page. Getting
+this wrong is not subtle in effect: a scan one channel off lights the wrong
+pixels.
 
 ## Scan diagnostics
 The sensor reports why a scan resolved what it did, and the server logs it at
@@ -369,7 +447,7 @@ Added 2026-08-20, from the first cylinder scans that lit correctly:
   dominant channel. Driving the coded frames at reduced intensity would test it.
 
 ## Tests
-`.github/workflows/tests.yml` runs all three on every push, to every branch.
+`.github/workflows/tests.yml` runs all of these on every push, to every branch.
 Locally, run them before trusting a geometry change:
 - `python3 -m pytest tests/test_tilt_geometry.py` — the tilt scheme against the
   shipped `_projection_matrix`, with synthetic ground truth. **Must go through
@@ -381,6 +459,19 @@ Locally, run them before trusting a geometry change:
   errors it is blind to by construction. This one is a script and exits
   non-zero itself; under pytest its module-level checks would run at import
   and trip over the `sys.exit`.
+- `python3 -m pytest tests/test_frame_confirm.py` — drives the real
+  `_run_coded_scan` against a fake string that **acknowledges commands before
+  its pixels change**, which is the gap every earlier test skipped. The
+  assertion that matters is that the pattern the phone was looking at when it
+  confirmed frame N is the pattern the server drove for frame N; a dropped
+  command is retried rather than captured stale, and a dead string aborts
+  rather than resolving garbage.
+- `python3 -m pytest tests/test_controller_strings.py` — reading the pixel count
+  off the controller, including the 0-based/1-based channel trap. The numbers
+  are the documented test box.
+- `node tests/test_coded_signature.mjs` — the signature the phone confirms with:
+  a still scene reads as no change, a pattern swap as a total one, and neither
+  answer depends on how small a part of the frame the prop occupies.
 
 There is no build workflow any more, and nothing left for it to build. The
 PyInstaller desktop app (`main.py`, `setup.py`, `blinkymap/`, `BlinkyMap.spec`,
@@ -400,18 +491,23 @@ branch. Both are gone now: the workflow, and the code it built.
    accept the self-signed cert on each and pick a role.
 2. **Confirm the build tag** in the sensor header matches what was deployed. If
    it does not, stop — you are testing stale code.
-3. Control tab: FPP IP, start channel, pixel count, **pixel pitch** (and string
-   breaks, if the run is more than one physical string), detection settings →
-   Save & Connect. Watch for "Sensor connected". There is no height field any
-   more.
+3. Control tab: FPP IP, **pixel pitch** (and string breaks, if the run is more
+   than one physical string), detection settings → Save & Connect. Watch for
+   "Sensor connected". Start channel and pixel count arrive from the
+   controller's own string config — check the list under the Pixel Count field
+   names the port you mean, and only override it if that list is wrong. There is
+   no height field any more.
 4. Phone: ⚙ → Open Camera → **Enable Sensors** → Set 0° here. Setup collapses
    once all three are done. Confirm the "Aim" readout shows a tilt angle and a
    derived height — if it says "manual", the accelerometer was refused and a
    typed height is being used instead.
 4b. **Centre the prop under the crosshair** and frame it the same way at every
    position. The crosshair defines the aim point the tilt is measured against.
-5. Tap **Scan From Here**. A 24-pixel scan takes ~3s (5 frames). Expect the
+5. Tap **Scan From Here**. A 24-pixel scan takes ~5s (5 frames). Expect the
    string to flash multi-coloured patterns, then circles on every pixel found.
+   The status bar names each frame as the phone confirms it; a frame that has
+   to be retried says so, and a scan that stops says why. **A scan that takes
+   longer than usual is the handshake working**, not a fault.
 6. **Some pixels reporting "not visible" is correct**, not a regression — that
    is honest occlusion reporting.
 7. Follow the suggested next angle. Keep positions ≥60° apart; a second scan is
@@ -422,6 +518,14 @@ branch. Both are gone now: the workflow, and the code it built.
 
 Quick server-side checks:
 - `grep _run_coded_scan /tmp/blinkymap_server.log` — frames and counts per scan.
+- `grep "confirmed in" /tmp/blinkymap_server.log` — per frame: how long the
+  string took to show it, how many attempts, how much of the view was lit.
+  Attempts above 1, or settle times creeping toward the timeout, mean the
+  controller is getting slower and `CODED_SETTLE_SEC` is doing less and less.
+- `grep -E "not confirmed|aborted" /tmp/blinkymap_server.log` — frames the
+  string never showed, and the scans that stopped because of them.
+- `grep "Adopted controller config" /tmp/blinkymap_server.log` — the pixel count
+  and start channel read off the controller, and which port they came from.
 - `grep device_pitch= /tmp/blinkymap_server.log` — the measured tilt and the
   camera height derived from it, per session. `device_pitch=none` means the
   phone fell back to a typed height and the measurement never arrived.

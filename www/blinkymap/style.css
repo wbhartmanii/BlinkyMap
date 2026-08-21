@@ -183,6 +183,14 @@ input:focus { border-color: var(--accent); }
 .ctrl-ok   { background: #1a3320; color: var(--green); border: 1px solid #69f0ae44; }
 .ctrl-fail { background: #2a2a10; color: var(--yellow); border: 1px solid #ffee5844; }
 
+/* ── Strings the controller says are wired ── */
+.string-row {
+  display: flex; justify-content: space-between; gap: 8px;
+  font-size: .78rem; padding: 3px 0;
+}
+.string-row + .string-row { border-top: 1px solid #ffffff11; }
+.string-row span:last-child { font-variant-numeric: tabular-nums; opacity: .85; }
+
 /* ── Range slider ── */
 input[type="range"] {
   -webkit-appearance: none;

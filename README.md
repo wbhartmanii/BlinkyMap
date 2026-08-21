@@ -16,7 +16,9 @@ phone's camera to detect where each pixel appears in the frame. After 2+
 scans from different angles it triangulates every pixel's real-world (X, Y, Z)
 position and builds a 3D model.
 
-1. **Setup** — enter your FPP controller IP, start channel, and pixel count.
+1. **Setup** — enter your FPP controller IP. The start channel and pixel
+   count come from the controller's own string configuration; correct them
+   by hand only if it reads them wrong.
    Open your phone camera and set the horizontal field of view.
 2. **Scan** — stand in front of the prop, enter your angle/distance/height, hit
    **Start Session**. BlinkyMap lights every pixel one at a time; your phone

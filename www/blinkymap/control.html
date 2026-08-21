@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>BlinkyMap Control</title>
-  <link rel="stylesheet" href="style.css?v=42" />
+  <link rel="stylesheet" href="style.css?v=43" />
 
   <!-- Import map for Three.js (served locally after install.sh) -->
   <script type="importmap">
@@ -58,12 +58,17 @@
   <label>Pixel Count
     <input id="cfg-pixels" type="number" value="100" min="1" max="2048" />
   </label>
+  <button class="btn-secondary wide" id="btn-detect-strings">Use controller's string config</button>
+  <div id="cfg-strings" class="controller-status" style="display:none"></div>
   <label>Frame Settle (s)
     <input id="cfg-delay" type="number" value="0.9" min="0.2" max="3" step="0.1" />
-    <span class="slider-hint">How long each coded frame is held before the camera
-      samples it. FPP confirms a pattern instantly but takes most of a second to
+    <span class="slider-hint">Minimum hold before the camera even looks at a
+      coded frame. FPP confirms a pattern instantly but takes most of a second to
       push it to the string: measured on a K2-Pi0, 0.25s showed only 4 of 5
-      patterns, 0.9s all five. Below 0.9 the server uses 0.9 anyway.</span>
+      patterns, 0.9s all five. This is now a floor, not the guarantee — the phone
+      watches the video and confirms each frame actually changed before it is
+      captured, retrying a frame that never arrives and stopping the scan if it
+      never does. A slow frame costs seconds, not the scan.</span>
   </label>
   <button class="btn-primary wide" id="btn-save-config">Save &amp; Connect</button>
   <div id="controller-status" class="controller-status" style="display:none"></div>
@@ -184,7 +189,7 @@
   </ol>
 </section>
 
-<script type="module" src="control.js?v=42"></script>
+<script type="module" src="control.js?v=43"></script>
 <p class="slider-hint" style="padding:0 1rem 1rem"><a href="./">&larr; change role</a></p>
 </body>
 </html>

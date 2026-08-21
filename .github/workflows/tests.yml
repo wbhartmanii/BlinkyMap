@@ -44,3 +44,14 @@ jobs:
 
       - name: tilt.js against the full W3C rotation matrix
         run: node tests/test_tilt.mjs
+
+      # Drives the real _run_coded_scan against a string that acknowledges
+      # commands before its pixels change — the gap every earlier test skipped.
+      - name: Per-frame confirmation against a string that lags
+        run: python3 -m pytest tests/test_frame_confirm.py -q
+
+      - name: Reading the pixel count off the controller
+        run: python3 -m pytest tests/test_controller_strings.py -q
+
+      - name: The frame signature the phone confirms with
+        run: node tests/test_coded_signature.mjs
