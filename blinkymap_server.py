@@ -155,6 +155,10 @@ class E131Output:
     def all_off(self):
         self._send_raw(bytes(self._buf_len))
 
+    def set_dark(self, pixel_count: int):
+        """Blank the string; native to E1.31, nothing to disarm."""
+        self._send_raw(bytes(self._buf_len))
+
     def release(self):
         """Drop the socket but leave the pixels lit; see FPPOutput.release."""
         self._sock.close()
@@ -217,6 +221,22 @@ class FPPOutput:
             "multisyncHosts": "",
             "args": [],
         }, timeout=3)
+
+    def set_dark(self, pixel_count: int):
+        """Blank the string while leaving FPP's test mode armed.
+
+        all_off() sends "Test Stop", which disarms test mode entirely, and
+        re-arming it takes FPP the better part of a second. That made the first
+        coded frame - the only one following the dark reference frame - arrive
+        before the pixels had lit: measured at 0.07% of the frame carrying a
+        decidable colour, against 30-70% for every later frame. Since a pixel
+        needs a colour in EVERY frame to carry a code, that one dark frame voided
+        the entire scan.
+
+        Driving an all-black pattern keeps test mode armed, so every transition
+        including the first is an ordinary pattern swap.
+        """
+        self.set_pattern("000000" * pixel_count, pixel_count)
 
     def release(self):
         """Drop the HTTP session but leave the pixels as they are.
@@ -767,9 +787,14 @@ class BlinkyModel:
 
     def model_confidence(self) -> dict:
         if not self.results:
+            # Same shape as the full return. A scan that detects nothing is
+            # precisely when the caller most needs these fields, and omitting
+            # them crashed the scan that had just failed.
             return {"overall": 0.0, "grade": "Poor", "coverage": 0.0,
-                    "mean_confidence": 0.0, "high": 0, "medium": 0, "low": 0,
-                    "unseen": 0, "chords": None}
+                    "mean_confidence": 0.0, "spread": 0.0, "reproj_px": 0.0,
+                    "consensus_px": 0.0, "limiting": "coverage",
+                    "sessions": len(self.sessions), "chords": None,
+                    "high": 0, "medium": 0, "low": 0, "unseen": 0}
 
         grades = {"high": 0, "medium": 0, "low": 0, "unseen": 0}
         confs = []
@@ -1639,7 +1664,7 @@ class BlinkyServer:
             # out. Near such a light the camera sees it PLUS the string's
             # reflection, so the dominant channel flips frame to frame and the
             # region can produce a valid-looking code.
-            await loop.run_in_executor(None, output.all_off)
+            await loop.run_in_executor(None, lambda: output.set_dark(total))
             await asyncio.sleep(max(cfg.inter_pixel_delay, CODED_SETTLE_SEC))
             self._awaiting_frame = -1
             self._frame_captured.clear()
